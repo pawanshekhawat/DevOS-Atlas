@@ -26,3 +26,7 @@ lerna-debug.log*
 # OS metadata
 .DS_Store
 Thumbs.db
+
+# DevOS Atlas local index
+.atlas/
+

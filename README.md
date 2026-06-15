@@ -7,8 +7,18 @@ DevOS Atlas is a visual, canvas-based Markdown workspace application designed fo
 ## Features
 
 - **Infinite Canvas Workspace**: Drag the background to pan, and scroll your mouse wheel to zoom in and out (10% to 300%).
-- **Interactive Markdown Windows**: Drag window headers to position documents. Drag window borders to resize.
+- **Interactive Markdown Windows**: Drag window headers or selected bodies to position documents. Drag custom borders to resize proportionally with sharp text rendering.
+- **Excalidraw/Figma-Style Navigation & Selection**:
+  - **Multi-select & Group Dragging**: Select multiple notes using marquee selection or Shift-click. Dragging anywhere on the body of a selected card (in preview mode) moves all selected cards together.
+  - **Temporary Pan Override**: Hold the `Space` key to temporarily switch to pan mode with `grab` and `grabbing` cursors. Releasing it instantly restores the active tool.
+  - **Escape to Deselect**: Clear card selections instantly by pressing the `Escape` key.
+  - **Toolbox Shortcuts**: Tap `v` for the Select (arrow) tool and `h` for the Pan (hand) tool.
+- **Mouse Wheel Priorities**:
+  - `Alt + Wheel`: Smooth canvas zoom centered on your cursor.
+  - `Ctrl + Wheel`: Horizontal scroll panning.
+  - `Wheel`: Vertical scroll panning.
 - **Rich Rendering & Editing**: Live Markdown editing with real-time preview rendering and Prism.js syntax highlighting.
+- **Staging Inbox Integration**: Connects with a local Express server to sync layouts, features, and change node artifacts dynamically on the canvas.
 - **File Explorer Sidebar**: Collapsible file explorer with search functionality to quickly find and focus documents.
 - **State Persistence**: Your workspace is automatically saved to local storage so you never lose your layout.
 - **Import/Export**: Drag & drop `.md` files onto the workspace or upload them via the header to populate the canvas.

@@ -4,11 +4,17 @@
   "description": "Interactive Markdown canvas and workspace application",
   "main": "index.html",
   "scripts": {
-    "dev": "vite",
+    "dev": "concurrently \"vite\" \"node server.js\"",
+    "server": "node server.js",
     "build": "vite build",
     "preview": "vite preview"
   },
   "devDependencies": {
     "vite": "^5.2.0"
+  },
+  "dependencies": {
+    "chokidar": "^5.0.0",
+    "concurrently": "^10.0.3",
+    "express": "^5.2.1"
   }
 }

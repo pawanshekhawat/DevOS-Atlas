@@ -53,7 +53,11 @@ let state = {
   pan: { x: 100, y: 100 },
   zoom: 1.0,
   theme: 'dark',
-  windows: []
+  windows: [],
+  changes: [],
+  features: [],
+  artifacts: [],
+  activeTool: 'select' // Default to select (arrow) tool
 };
 
 // Global variables for tracking canvas/interaction state
@@ -63,9 +67,16 @@ let startMouse = { x: 0, y: 0 };
 let startPan = { x: 0, y: 0 };
 let isSpacePressed = false;
 
+// Selection tracking globals
+let isSelecting = false;
+let selectionStart = { x: 0, y: 0 };
+let selectionBoxEl = null;
+
 // Active drag/resize trackers
 let activeDrag = null; // { window, startX, startY, startWinX, startWinY }
 let activeResize = null; // { window, handleType, startX, startY, startW, startH, startXPos, startYPos }
+let isServerConnected = false;
+let currentInboxItemToAccept = null;
 
 // DOM Cache
 const canvasContainer = document.getElementById('canvas-container');
@@ -108,9 +119,11 @@ function loadState() {
       if (!state.zoom) state.zoom = 1.0;
       if (!state.windows) state.windows = [];
       if (!state.theme) state.theme = 'dark';
+      if (!state.activeTool) state.activeTool = 'select';
       
       // Determine max Z Index of loaded windows
       state.windows.forEach(w => {
+        w.id = String(w.id);
         if (w.zIndex > maxZIndex) maxZIndex = w.zIndex;
       });
     } catch (e) {
@@ -182,7 +195,7 @@ function createWindowDOM(win) {
     <div class="window-header" data-id="${win.id}">
       <div class="window-title-area">
         <span class="window-title-icon">${ICONS.file}</span>
-        <input type="text" class="window-title-input" value="${escapeHtml(win.name)}" title="Double click to edit title">
+        <input type="text" class="window-title-input" value="${escapeHtml(win.name)}" ${win.editMode ? '' : 'disabled'} title="${win.editMode ? 'Edit title' : 'Rename possible in Edit mode'}">
       </div>
       <div class="window-controls">
         <button class="window-btn edit-btn tooltip ${win.editMode ? 'active' : ''}" data-tooltip="Toggle Editor (📝)">
@@ -219,6 +232,279 @@ function createWindowDOM(win) {
 
   // Event handlers inside the window
   setupWindowEventListeners(winEl, win);
+}
+
+function createChangeNodeDOM(change, changeArtifacts) {
+  change.id = String(change.id);
+  const winEl = document.createElement('div');
+  winEl.className = 'window-container change-node';
+  winEl.id = change.id;
+  winEl.style.left = `${change.x}px`;
+  winEl.style.top = `${change.y}px`;
+  winEl.style.width = `340px`;
+  winEl.style.height = `auto`;
+  winEl.style.zIndex = change.zIndex || 10;
+
+  // Find feature name
+  const feature = state.features.find(f => f.id === change.feature_id);
+  const featureBadge = feature ? `<span class="change-feature-badge">${escapeHtml(feature.name)}</span>` : '';
+
+  let artifactsHtml = '';
+  changeArtifacts.forEach(art => {
+    let typeLabel = art.type.toUpperCase();
+    artifactsHtml += `
+      <div class="artifact-link" data-path="${art.path}" data-type="${art.type}">
+        <span class="artifact-link-icon">${ICONS.file}</span>
+        <span style="font-weight: 500;">${typeLabel}</span>
+      </div>
+    `;
+  });
+
+  winEl.innerHTML = `
+    <div class="window-header" data-id="${change.id}">
+      <div class="window-title-area">
+        ${featureBadge}
+        <span style="font-weight: 600; font-size: 13px; color: var(--text-primary); text-overflow: ellipsis; overflow: hidden; white-space: nowrap;">${escapeHtml(change.title)}</span>
+      </div>
+    </div>
+    <div class="window-body" style="padding: 16px;">
+      ${artifactsHtml || '<div style="color:var(--text-muted); font-size: 12px; text-align: center;">No artifacts attached</div>'}
+    </div>
+  `;
+
+  canvasWorkspace.appendChild(winEl);
+
+  // Focus on mouse down
+  winEl.addEventListener('mousedown', (e) => {
+    focusWindow(change.id);
+
+    // Group dragging check for change nodes
+    if (winEl.classList.contains('selected')) {
+      const isInteractive = e.target.closest('button, a, input, textarea, .resize-handle, .window-header, .artifact-link');
+      if (!isInteractive) {
+        e.preventDefault();
+        
+        const selectedWins = [];
+        document.querySelectorAll('.window-container.selected').forEach(el => {
+          const wId = el.id;
+          const standardWin = state.windows.find(w => w.id === wId);
+          const changeWin = state.changes.find(c => c.id === wId);
+          const targetWin = standardWin || changeWin;
+          if (targetWin) {
+            selectedWins.push({
+              window: targetWin,
+              startWinX: targetWin.x,
+              startWinY: targetWin.y,
+              isChangeNode: !!changeWin
+            });
+          }
+        });
+
+        activeDrag = {
+          startX: e.clientX,
+          startY: e.clientY,
+          selectedWins: selectedWins
+        };
+      }
+    }
+  });
+
+  // Drag handler start
+  const header = winEl.querySelector('.window-header');
+  header.addEventListener('mousedown', (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    focusWindow(change.id);
+    
+    if (!winEl.classList.contains('selected')) {
+      if (!e.shiftKey) {
+        document.querySelectorAll('.window-container.selected').forEach(el => el.classList.remove('selected'));
+      }
+      winEl.classList.add('selected');
+    }
+
+    const selectedWins = [];
+    document.querySelectorAll('.window-container.selected').forEach(el => {
+      const wId = el.id;
+      const standardWin = state.windows.find(w => w.id === wId);
+      const changeWin = state.changes.find(c => c.id === wId);
+      const targetWin = standardWin || changeWin;
+      if (targetWin) {
+        selectedWins.push({
+          window: targetWin,
+          startWinX: targetWin.x,
+          startWinY: targetWin.y,
+          isChangeNode: !!changeWin
+        });
+      }
+    });
+
+    activeDrag = {
+      startX: e.clientX,
+      startY: e.clientY,
+      selectedWins: selectedWins
+    };
+  });
+
+  // Setup click listeners for artifacts
+  winEl.querySelectorAll('.artifact-link').forEach(link => {
+    link.addEventListener('click', (e) => {
+      const filePath = link.getAttribute('data-path');
+      const fileType = link.getAttribute('data-type');
+      openArtifactInViewer(filePath, change.title + ' - ' + fileType.toUpperCase());
+    });
+  });
+}
+
+function openArtifactInViewer(relativePath, name) {
+  fetch(`http://localhost:3000/${relativePath}`)
+    .then(res => res.text())
+    .then(content => {
+      // Check if already open
+      const existing = state.windows.find(w => w.name === name);
+      if (existing) {
+        focusWindow(existing.id);
+        centerOnWindow(existing.id);
+      } else {
+        const id = 'win_' + Date.now();
+        const newWin = {
+          id: id,
+          name: name,
+          content: content,
+          x: 150 + Math.random() * 100,
+          y: 150 + Math.random() * 100,
+          width: 600,
+          height: 450,
+          zIndex: ++maxZIndex,
+          isCollapsed: false,
+          editMode: false,
+          openComplete: true
+        };
+        state.windows.push(newWin);
+        createWindowDOM(newWin);
+        focusWindow(id);
+      }
+    });
+}
+
+function syncWithServer() {
+  fetch('http://localhost:3000/api/changes')
+    .then(res => res.json())
+    .then(data => {
+      if (data.success) {
+        isServerConnected = true;
+        state.changes = (data.changes || []).map(c => {
+          c.id = String(c.id);
+          return c;
+        });
+        state.features = (data.features || []).map(f => {
+          f.id = String(f.id);
+          return f;
+        });
+        state.artifacts = (data.artifacts || []).map(art => {
+          art.id = String(art.id);
+          art.change_id = String(art.change_id);
+          return art;
+        });
+        
+        renderChangeNodes();
+      }
+    })
+    .catch(err => {
+      isServerConnected = false;
+      console.warn("Express server is not running locally. Operating in standalone mode.");
+    });
+
+  if (isServerConnected) {
+    fetch('http://localhost:3000/api/inbox')
+      .then(res => res.json())
+      .then(data => {
+        if (data.success) {
+          const normalizedInbox = (data.inbox || []).map(item => {
+            item.id = String(item.id);
+            return item;
+          });
+          renderInboxList(normalizedInbox);
+        }
+      })
+      .catch(err => {
+        // Ignored
+      });
+  }
+}
+
+function renderChangeNodes() {
+  document.querySelectorAll('.window-container.change-node').forEach(el => el.remove());
+
+  state.changes.forEach(change => {
+    const changeArtifacts = state.artifacts.filter(art => art.change_id === change.id);
+    createChangeNodeDOM(change, changeArtifacts);
+  });
+}
+
+function renderInboxList(inboxItems) {
+  const inboxListEl = document.getElementById('inbox-list');
+  const badgeEl = document.getElementById('inbox-badge');
+  
+  inboxListEl.innerHTML = '';
+  
+  if (inboxItems.length === 0) {
+    inboxListEl.innerHTML = '<div style="color:var(--text-muted); font-size:13px; text-align:center; padding:20px;">No pending changes detected</div>';
+    badgeEl.style.display = 'none';
+    return;
+  }
+
+  badgeEl.textContent = inboxItems.length;
+  badgeEl.style.display = 'inline-block';
+
+  inboxItems.forEach(item => {
+    const li = document.createElement('li');
+    li.className = 'inbox-item';
+    
+    let filesList = '';
+    if (item.planPath) filesList += `<div class="inbox-item-file"><span class="inbox-item-file-dot"></span>Plan</div>`;
+    if (item.tasksPath) filesList += `<div class="inbox-item-file"><span class="inbox-item-file-dot"></span>Tasks</div>`;
+    if (item.walkthroughPath) filesList += `<div class="inbox-item-file"><span class="inbox-item-file-dot"></span>Walkthrough</div>`;
+
+    li.innerHTML = `
+      <div class="inbox-item-title">${escapeHtml(item.title)}</div>
+      <div class="inbox-item-files">${filesList}</div>
+      <div class="inbox-item-actions">
+        <button class="inbox-item-btn discard-inbox-btn" data-id="${item.id}">Discard</button>
+        <button class="inbox-item-btn accept accept-inbox-btn" data-id="${item.id}">Accept</button>
+      </div>
+    `;
+
+    li.querySelector('.accept-inbox-btn').addEventListener('click', (e) => {
+      const inboxId = e.currentTarget.getAttribute('data-id');
+      const itemToAccept = inboxItems.find(x => x.id === inboxId);
+      if (itemToAccept) {
+        currentInboxItemToAccept = itemToAccept;
+        document.getElementById('change-title-input').value = itemToAccept.title;
+        document.getElementById('change-feature-input').value = '';
+        document.getElementById('accept-modal').style.display = 'flex';
+      }
+    });
+
+    li.querySelector('.discard-inbox-btn').addEventListener('click', (e) => {
+      const inboxId = e.currentTarget.getAttribute('data-id');
+      if (confirm("Discard this change candidate?")) {
+        fetch('http://localhost:3000/api/inbox/discard', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ id: inboxId })
+        })
+        .then(res => res.json())
+        .then(data => {
+          if (data.success) {
+            syncWithServer();
+          }
+        });
+      }
+    });
+
+    inboxListEl.appendChild(li);
+  });
 }
 
 function escapeHtml(text) {
@@ -268,6 +554,63 @@ function renderMarkdown(winId) {
   if (window.Prism) {
     window.Prism.highlightAllUnder(previewEl);
   }
+
+  updateWindowScale(win, winEl);
+}
+
+function updateWindowScale(win, winEl) {
+  if (!winEl) return;
+  const previewEl = winEl.querySelector('.markdown-preview');
+  const bodyEl = winEl.querySelector('.window-body');
+  if (!previewEl || !bodyEl) return;
+
+  if (win.editMode) {
+    // Reset styles for edit mode so normal editing scroll is preserved
+    previewEl.style.transform = '';
+    previewEl.style.zoom = '';
+    previewEl.style.width = '';
+    previewEl.style.height = '';
+    previewEl.style.position = '';
+    bodyEl.style.overflow = 'auto';
+    return;
+  }
+
+  bodyEl.style.overflow = 'hidden';
+
+  // If base dimensions are not set, calculate them
+  if (!win.baseWidth || !win.baseHeight) {
+    // Reset styles to get the natural base dimensions
+    previewEl.style.transform = '';
+    previewEl.style.zoom = '';
+    previewEl.style.position = '';
+    previewEl.style.width = '100%';
+    previewEl.style.height = 'auto';
+    
+    const currentWidth = win.width || 450;
+    previewEl.style.width = `${currentWidth}px`;
+    
+    const naturalHeight = previewEl.scrollHeight;
+    
+    win.baseWidth = currentWidth;
+    win.baseHeight = Math.max(100, naturalHeight);
+
+    if (win.openComplete) {
+      win.height = win.baseHeight + 42; // 42 is header height
+      winEl.style.height = `${win.height}px`;
+      delete win.openComplete;
+      saveState();
+    }
+  }
+
+  // Calculate the scaling factor
+  const scale = win.width / win.baseWidth;
+
+  // Apply native CSS zoom scaling
+  previewEl.style.transform = '';
+  previewEl.style.position = 'relative';
+  previewEl.style.width = `${win.baseWidth}px`;
+  previewEl.style.height = `${win.baseHeight}px`;
+  previewEl.style.zoom = scale;
 }
 
 function focusWindow(winId) {
@@ -326,6 +669,36 @@ function setupWindowEventListeners(winEl, win) {
   winEl.addEventListener('mousedown', (e) => {
     // Focus window
     focusWindow(win.id);
+
+    // Group dragging check
+    if (!win.editMode && winEl.classList.contains('selected')) {
+      const isInteractive = e.target.closest('button, a, input, textarea, .resize-handle, .window-header');
+      if (!isInteractive) {
+        e.preventDefault();
+        
+        const selectedWins = [];
+        document.querySelectorAll('.window-container.selected').forEach(el => {
+          const wId = el.id;
+          const standardWin = state.windows.find(w => w.id === wId);
+          const changeWin = state.changes.find(c => c.id === wId);
+          const targetWin = standardWin || changeWin;
+          if (targetWin) {
+            selectedWins.push({
+              window: targetWin,
+              startWinX: targetWin.x,
+              startWinY: targetWin.y,
+              isChangeNode: !!changeWin
+            });
+          }
+        });
+
+        activeDrag = {
+          startX: e.clientX,
+          startY: e.clientY,
+          selectedWins: selectedWins
+        };
+      }
+    }
   });
 
   // Rename action
@@ -370,11 +743,18 @@ function setupWindowEventListeners(winEl, win) {
       editBtn.innerHTML = ICONS.preview;
       editBtn.setAttribute('data-tooltip', 'Toggle Preview (📝)');
       textarea.focus();
+      titleInput.removeAttribute('disabled');
+      titleInput.setAttribute('title', 'Edit title');
     } else {
       editor.style.display = 'none';
       preview.style.display = 'block';
       editBtn.innerHTML = ICONS.edit;
       editBtn.setAttribute('data-tooltip', 'Toggle Editor (📝)');
+      titleInput.setAttribute('disabled', 'true');
+      titleInput.setAttribute('title', 'Rename possible in Edit mode');
+      win.baseWidth = null;
+      win.baseHeight = null;
+      win.openComplete = true;
       renderMarkdown(win.id);
     }
     saveState();
@@ -414,14 +794,38 @@ function setupWindowEventListeners(winEl, win) {
       return;
     }
     e.preventDefault();
+    e.stopPropagation();
     focusWindow(win.id);
+
+    // If card is not selected, select it
+    if (!winEl.classList.contains('selected')) {
+      if (!e.shiftKey) {
+        document.querySelectorAll('.window-container.selected').forEach(el => el.classList.remove('selected'));
+      }
+      winEl.classList.add('selected');
+    }
     
+    // Gather all selected windows and their starting coordinates
+    const selectedWins = [];
+    document.querySelectorAll('.window-container.selected').forEach(el => {
+      const wId = el.id;
+      const standardWin = state.windows.find(w => w.id === wId);
+      const changeWin = state.changes.find(c => c.id === wId);
+      const targetWin = standardWin || changeWin;
+      if (targetWin) {
+        selectedWins.push({
+          window: targetWin,
+          startWinX: targetWin.x,
+          startWinY: targetWin.y,
+          isChangeNode: !!changeWin
+        });
+      }
+    });
+
     activeDrag = {
-      window: win,
       startX: e.clientX,
       startY: e.clientY,
-      startWinX: win.x,
-      startWinY: win.y
+      selectedWins: selectedWins
     };
   });
 
@@ -482,7 +886,8 @@ function createNewNote(x = null, y = null) {
     height: 300,
     zIndex: ++maxZIndex,
     isCollapsed: false,
-    editMode: true
+    editMode: true,
+    openComplete: true
   };
 
   state.windows.push(newWin);
@@ -568,7 +973,8 @@ function handleFileUpload(files) {
         height: 400,
         zIndex: ++maxZIndex,
         isCollapsed: false,
-        editMode: false
+        editMode: false,
+        openComplete: true
       };
 
       state.windows.push(newWin);
@@ -681,6 +1087,29 @@ function loadSampleWorkspace() {
   saveState();
 }
 
+function setActiveTool(tool) {
+  state.activeTool = tool;
+
+  const selectBtn = document.getElementById('tool-select-btn');
+  const panBtn = document.getElementById('tool-pan-btn');
+
+  if (tool === 'select') {
+    selectBtn?.classList.add('active');
+    panBtn?.classList.remove('active');
+    canvasContainer.style.cursor = 'default';
+    canvasContainer.classList.remove('pan-mode');
+  } else {
+    selectBtn?.classList.remove('active');
+    panBtn?.classList.add('active');
+    canvasContainer.style.cursor = 'grab';
+    canvasContainer.classList.add('pan-mode');
+    
+    // Deselect all selected windows when entering pan mode
+    document.querySelectorAll('.window-container.selected').forEach(el => el.classList.remove('selected'));
+  }
+  saveState();
+}
+
 // ----------------------------------------------------
 // Global DOM Event Bindings
 // ----------------------------------------------------
@@ -695,39 +1124,79 @@ function init() {
   toggleOnboarding();
   setupDragAndDrop();
 
+  // Set active tool and cursor state
+  setActiveTool(state.activeTool || 'select');
+
   // Resize handler updates on window scale
   window.addEventListener('resize', () => {
     updateTransform();
   });
 
-  // Track spacebar holds for panning toggle
+  // Track spacebar holds for panning toggle, Escape key, and V/H shortcuts
   window.addEventListener('keydown', (e) => {
-    if (e.code === 'Space' && document.activeElement.tagName !== 'TEXTAREA' && document.activeElement.tagName !== 'INPUT') {
+    if (document.activeElement.tagName === 'TEXTAREA' || document.activeElement.tagName === 'INPUT') {
+      return;
+    }
+    if (e.code === 'Space') {
+      e.preventDefault(); // Prevent page scrolling
       isSpacePressed = true;
-      canvasContainer.style.cursor = 'grab';
+      if (!isPanning) {
+        canvasContainer.style.cursor = 'grab';
+      }
+    }
+    if (e.key === 'Escape') {
+      document.querySelectorAll('.window-container.selected').forEach(el => el.classList.remove('selected'));
+    }
+    if (e.key === 'v' || e.key === 'V') {
+      setActiveTool('select');
+    }
+    if (e.key === 'h' || e.key === 'H') {
+      setActiveTool('pan');
     }
   });
 
   window.addEventListener('keyup', (e) => {
     if (e.code === 'Space') {
       isSpacePressed = false;
-      canvasContainer.style.cursor = '';
+      if (!isPanning) {
+        canvasContainer.style.cursor = state.activeTool === 'pan' ? 'grab' : 'default';
+      }
     }
   });
 
-  // Canvas Mouse Down - Drag background to Pan / Double click note creation
+  // Canvas Mouse Down - Drag background to Pan / Marquee Selection
   canvasContainer.addEventListener('mousedown', (e) => {
-    // Only pan if we click grid or canvas background or space is held
     const isBackground = e.target === canvasContainer || e.target === canvasGrid;
     
-    if (isBackground || isSpacePressed || e.button === 1) { // 1 = middle mouse click
-      e.preventDefault();
-      isPanning = true;
-      canvasContainer.style.cursor = 'grabbing';
-      startMouse.x = e.clientX;
-      startMouse.y = e.clientY;
-      startPan.x = state.pan.x;
-      startPan.y = state.pan.y;
+    if (state.activeTool === 'pan' || isSpacePressed || e.button === 1) {
+      if (isBackground || isSpacePressed || e.button === 1) {
+        e.preventDefault();
+        isPanning = true;
+        canvasContainer.style.cursor = 'grabbing';
+        startMouse.x = e.clientX;
+        startMouse.y = e.clientY;
+        startPan.x = state.pan.x;
+        startPan.y = state.pan.y;
+      }
+    } else if (state.activeTool === 'select' && e.button === 0) {
+      if (isBackground) {
+        e.preventDefault();
+        isSelecting = true;
+        selectionStart.x = e.clientX;
+        selectionStart.y = e.clientY;
+        
+        // Deselect all windows/elements
+        document.querySelectorAll('.window-container.selected').forEach(el => el.classList.remove('selected'));
+        
+        // Create selection box element
+        selectionBoxEl = document.createElement('div');
+        selectionBoxEl.className = 'selection-box';
+        selectionBoxEl.style.left = `${e.clientX}px`;
+        selectionBoxEl.style.top = `${e.clientY}px`;
+        selectionBoxEl.style.width = '0px';
+        selectionBoxEl.style.height = '0px';
+        document.body.appendChild(selectionBoxEl);
+      }
     }
   });
 
@@ -749,7 +1218,7 @@ function init() {
     }
   });
 
-  // Mouse Move tracking for Drag, Resize, Pan actions
+  // Mouse Move tracking for Drag, Resize, Selection, Pan actions
   window.addEventListener('mousemove', (e) => {
     // 1. Pan Action
     if (isPanning) {
@@ -761,23 +1230,53 @@ function init() {
       saveState();
     }
 
-    // 2. Drag Action (Header Drag)
+    // 2. Selection Action (Marquee)
+    else if (isSelecting && selectionBoxEl) {
+      const x1 = Math.min(e.clientX, selectionStart.x);
+      const x2 = Math.max(e.clientX, selectionStart.x);
+      const y1 = Math.min(e.clientY, selectionStart.y);
+      const y2 = Math.max(e.clientY, selectionStart.y);
+
+      selectionBoxEl.style.left = `${x1}px`;
+      selectionBoxEl.style.top = `${y1}px`;
+      selectionBoxEl.style.width = `${x2 - x1}px`;
+      selectionBoxEl.style.height = `${y2 - y1}px`;
+
+      // Check intersections with all cards
+      const boxRect = { left: x1, top: y1, right: x2, bottom: y2 };
+      document.querySelectorAll('.window-container').forEach(winEl => {
+        const winRect = winEl.getBoundingClientRect();
+        const intersects = !(boxRect.right < winRect.left || 
+                             boxRect.left > winRect.right || 
+                             boxRect.bottom < winRect.top || 
+                             boxRect.top > winRect.bottom);
+        if (intersects) {
+          winEl.classList.add('selected');
+        } else {
+          winEl.classList.remove('selected');
+        }
+      });
+    }
+
+    // 3. Drag Action (Header Drag - with Group Drag support)
     else if (activeDrag) {
       const dx = (e.clientX - activeDrag.startX) / state.zoom;
       const dy = (e.clientY - activeDrag.startY) / state.zoom;
       
-      const win = activeDrag.window;
-      win.x = Math.round(activeDrag.startWinX + dx);
-      win.y = Math.round(activeDrag.startWinY + dy);
+      activeDrag.selectedWins.forEach(item => {
+        const win = item.window;
+        win.x = Math.round(item.startWinX + dx);
+        win.y = Math.round(item.startWinY + dy);
 
-      const winEl = document.getElementById(win.id);
-      if (winEl) {
-        winEl.style.left = `${win.x}px`;
-        winEl.style.top = `${win.y}px`;
-      }
+        const winEl = document.getElementById(win.id);
+        if (winEl) {
+          winEl.style.left = `${win.x}px`;
+          winEl.style.top = `${win.y}px`;
+        }
+      });
     }
 
-    // 3. Resize Action (Edge / Corner Resize)
+    // 4. Resize Action (Edge / Corner Resize)
     else if (activeResize) {
       const dx = (e.clientX - activeResize.startX) / state.zoom;
       const dy = (e.clientY - activeResize.startY) / state.zoom;
@@ -787,15 +1286,43 @@ function init() {
       
       if (!winEl) return;
 
-      if (activeResize.handleType === 'r' || activeResize.handleType === 'se') {
-        win.width = Math.max(200, Math.round(activeResize.startW + dx));
-        winEl.style.width = `${win.width}px`;
+      // Ensure base dimensions are cached
+      if (!win.baseWidth || !win.baseHeight) {
+        win.baseWidth = win.width || 450;
+        win.baseHeight = (win.height || 400) - 42;
       }
-      
-      if (activeResize.handleType === 'b' || activeResize.handleType === 'se') {
-        win.height = Math.max(120, Math.round(activeResize.startH + dy));
-        winEl.style.height = `${win.height}px`;
+
+      // Calculate scale based on the handle type
+      let scale = 1.0;
+      if (activeResize.handleType === 'r') {
+        const targetWidth = Math.max(200, activeResize.startW + dx);
+        scale = targetWidth / win.baseWidth;
+      } else if (activeResize.handleType === 'b') {
+        const targetHeight = Math.max(120, activeResize.startH + dy);
+        scale = (targetHeight - 42) / win.baseHeight;
+      } else if (activeResize.handleType === 'se') {
+        const targetWidth = Math.max(200, activeResize.startW + dx);
+        const targetHeight = Math.max(120, activeResize.startH + dy);
+        const scaleX = targetWidth / win.baseWidth;
+        const scaleY = (targetHeight - 42) / win.baseHeight;
+        scale = Math.max(scaleX, scaleY);
       }
+
+      // Constrain scale so it doesn't violate min width (200px) or min height (120px)
+      const minScaleW = 200 / win.baseWidth;
+      const minScaleH = (120 - 42) / win.baseHeight;
+      const minScale = Math.max(minScaleW, minScaleH);
+      scale = Math.max(minScale, scale);
+
+      // Rescale dimensions proportionally
+      win.width = Math.round(win.baseWidth * scale);
+      win.height = Math.round(win.baseHeight * scale + 42);
+
+      winEl.style.width = `${win.width}px`;
+      winEl.style.height = `${win.height}px`;
+
+      // Update scale on preview panel dynamically during resize
+      updateWindowScale(win, winEl);
     }
   });
 
@@ -803,9 +1330,31 @@ function init() {
   window.addEventListener('mouseup', () => {
     if (isPanning) {
       isPanning = false;
-      canvasContainer.style.cursor = isSpacePressed ? 'grab' : '';
+      canvasContainer.style.cursor = isSpacePressed ? 'grab' : (state.activeTool === 'pan' ? 'grab' : 'default');
+    }
+    if (isSelecting) {
+      isSelecting = false;
+      if (selectionBoxEl) {
+        selectionBoxEl.remove();
+        selectionBoxEl = null;
+      }
     }
     if (activeDrag) {
+      if (isServerConnected) {
+        activeDrag.selectedWins.forEach(item => {
+          if (item.isChangeNode) {
+            fetch('http://localhost:3000/api/changes/layout', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                id: item.window.id,
+                x: item.window.x,
+                y: item.window.y
+              })
+            }).catch(err => console.error("Failed to save coordinates:", err));
+          }
+        });
+      }
       activeDrag = null;
       saveState();
     }
@@ -815,36 +1364,46 @@ function init() {
     }
   });
 
-  // Canvas Zoom Engine (Scroll wheel, centered on cursor coords)
+  // Canvas Zoom & Scroll Engine
   canvasContainer.addEventListener('wheel', (e) => {
     e.preventDefault();
 
-    // Determine scale direction
-    const zoomIntensity = 0.08;
-    const delta = -e.deltaY;
-    const zoomFactor = delta > 0 ? (1 + zoomIntensity) : (1 - zoomIntensity);
-    
-    // Zoom boundary limitations (10% to 300%)
-    const previousZoom = state.zoom;
-    let nextZoom = state.zoom * zoomFactor;
-    nextZoom = Math.max(0.1, Math.min(3.0, nextZoom));
+    const isPanMode = state.activeTool === 'pan' || isSpacePressed;
 
-    // Screen mouse offsets relative to outer container bounds
-    const rect = canvasContainer.getBoundingClientRect();
-    const mouseX = e.clientX - rect.left;
-    const mouseY = e.clientY - rect.top;
+    if (e.altKey || (isPanMode && !e.ctrlKey)) {
+      // Zoom engine (centered on cursor coordinates)
+      const zoomIntensity = 0.08;
+      const delta = -e.deltaY;
+      const zoomFactor = delta > 0 ? (1 + zoomIntensity) : (1 - zoomIntensity);
+      
+      const previousZoom = state.zoom;
+      let nextZoom = state.zoom * zoomFactor;
+      nextZoom = Math.max(0.1, Math.min(3.0, nextZoom));
 
-    // Convert mouse to layout canvas coordinates
-    const canvasX = (mouseX - state.pan.x) / previousZoom;
-    const canvasY = (mouseY - state.pan.y) / previousZoom;
+      const rect = canvasContainer.getBoundingClientRect();
+      const mouseX = e.clientX - rect.left;
+      const mouseY = e.clientY - rect.top;
 
-    // Update state variables
-    state.zoom = nextZoom;
-    state.pan.x = mouseX - canvasX * state.zoom;
-    state.pan.y = mouseY - canvasY * state.zoom;
+      const canvasX = (mouseX - state.pan.x) / previousZoom;
+      const canvasY = (mouseY - state.pan.y) / previousZoom;
 
-    updateTransform();
-    saveState();
+      state.zoom = nextZoom;
+      state.pan.x = mouseX - canvasX * state.zoom;
+      state.pan.y = mouseY - canvasY * state.zoom;
+
+      updateTransform();
+      saveState();
+    } else if (e.ctrlKey) {
+      // Horizontal canvas scroll
+      state.pan.x -= e.deltaY;
+      updateTransform();
+      saveState();
+    } else {
+      // Vertical canvas scroll
+      state.pan.y -= e.deltaY;
+      updateTransform();
+      saveState();
+    }
   }, { passive: false });
 
   // Floating Toolbar Buttons
@@ -854,6 +1413,15 @@ function init() {
 
   document.getElementById('zoom-in-btn').addEventListener('click', () => {
     adjustZoomCenter(1.15);
+  });
+
+  // Toolbar mode button click bindings
+  document.getElementById('tool-select-btn').addEventListener('click', () => {
+    setActiveTool('select');
+  });
+
+  document.getElementById('tool-pan-btn').addEventListener('click', () => {
+    setActiveTool('pan');
   });
 
   document.getElementById('zoom-reset-btn').addEventListener('click', () => {
@@ -940,6 +1508,69 @@ function init() {
       helpModal.style.display = 'none';
     }
   });
+
+  // Staging Inbox Sidebar Controls
+  const inboxSidebar = document.getElementById('inbox-sidebar');
+  const toggleInboxBtn = document.getElementById('toggle-inbox-btn');
+  const closeInboxBtn = document.getElementById('close-inbox-btn');
+
+  toggleInboxBtn.addEventListener('click', () => {
+    inboxSidebar.classList.toggle('open');
+  });
+
+  closeInboxBtn.addEventListener('click', () => {
+    inboxSidebar.classList.remove('open');
+  });
+
+  // Accept Modal Controls
+  const acceptModal = document.getElementById('accept-modal');
+  const closeAcceptModalBtn = document.getElementById('close-accept-modal-btn');
+  const cancelAcceptBtn = document.getElementById('cancel-accept-btn');
+  const acceptChangeForm = document.getElementById('accept-change-form');
+
+  const closeAcceptModal = () => {
+    acceptModal.style.display = 'none';
+    currentInboxItemToAccept = null;
+  };
+
+  closeAcceptModalBtn.addEventListener('click', closeAcceptModal);
+  cancelAcceptBtn.addEventListener('click', closeAcceptModal);
+
+  acceptChangeForm.addEventListener('submit', (e) => {
+    e.preventDefault();
+    if (!currentInboxItemToAccept) return;
+
+    const title = document.getElementById('change-title-input').value.trim();
+    const featureName = document.getElementById('change-feature-input').value.trim();
+
+    fetch('http://localhost:3000/api/inbox/accept', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        id: currentInboxItemToAccept.id,
+        title: title,
+        featureName: featureName
+      })
+    })
+    .then(res => res.json())
+    .then(data => {
+      if (data.success) {
+        closeAcceptModal();
+        syncWithServer();
+      }
+    });
+  });
+
+  // Close accept modal when clicking outside content
+  window.addEventListener('click', (e) => {
+    if (e.target === acceptModal) {
+      closeAcceptModal();
+    }
+  });
+
+  // Start periodic sync polling
+  syncWithServer();
+  setInterval(syncWithServer, 4000);
 }
 
 function adjustZoomCenter(ratio) {

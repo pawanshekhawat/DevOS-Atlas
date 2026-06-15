@@ -90,11 +90,15 @@ body, html {
   right: 0;
   bottom: 0;
   overflow: hidden;
-  cursor: grab;
+  cursor: default; /* Select mode is default arrow */
   outline: none;
 }
 
-.canvas-container:active {
+.canvas-container.pan-mode {
+  cursor: grab;
+}
+
+.canvas-container.pan-mode:active {
   cursor: grabbing;
 }
 
@@ -118,7 +122,6 @@ body, html {
   width: 100%;
   height: 100%;
   transform-origin: 0 0;
-  will-change: transform;
   pointer-events: none; /* Let clicks pass to container unless they hit active items */
 }
 
@@ -475,7 +478,6 @@ body, html {
   box-shadow: 0 12px 40px var(--glass-shadow);
   overflow: hidden;
   pointer-events: auto; /* Active triggers */
-  will-change: transform, width, height;
 }
 
 .window-container.focused {
@@ -606,6 +608,9 @@ body, html {
   font-size: 0.95rem;
   line-height: 1.6;
   color: var(--text-primary);
+  -webkit-font-smoothing: subpixel-antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
 }
 
 /* Collapsed State */
@@ -1038,6 +1043,222 @@ body.light-theme .modal-overlay {
   0%, 100% { transform: translateY(0); }
   50% { transform: translateY(-8px); }
 }
-.animate-bounce {
-  animation: bounce 2s infinite;
+
+/* ----------------------------------------------------
+   DevOS Atlas Specific UI Styles
+   ---------------------------------------------------- */
+.sidebar-right {
+  left: auto;
+  right: 16px;
+  transform: translateX(310px);
 }
+
+.sidebar-right.open {
+  transform: translateX(0);
+}
+
+.badge {
+  position: absolute;
+  top: -4px;
+  right: -4px;
+  background: var(--danger-color);
+  color: white;
+  font-size: 0.7rem;
+  font-weight: 700;
+  padding: 2px 6px;
+  border-radius: 10px;
+  min-width: 18px;
+  text-align: center;
+  box-shadow: 0 2px 6px rgba(0,0,0,0.3);
+}
+
+.inbox-list {
+  flex: 1;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.inbox-item {
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  box-shadow: 0 4px 12px var(--glass-shadow);
+}
+
+.inbox-item-title {
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--text-primary);
+  line-height: 1.4;
+}
+
+.inbox-item-files {
+  font-size: 0.75rem;
+  color: var(--text-secondary);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.inbox-item-file {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.inbox-item-file-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent-cyan);
+}
+
+.inbox-item-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+  margin-top: 4px;
+}
+
+.inbox-item-btn {
+  padding: 6px 12px;
+  font-size: 0.75rem;
+  border-radius: 6px;
+  cursor: pointer;
+  border: 1px solid var(--border-color);
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  font-weight: 500;
+  transition: all 0.2s;
+}
+
+.inbox-item-btn.accept {
+  background: var(--accent-color);
+  border-color: var(--accent-color);
+  color: white;
+}
+
+.inbox-item-btn.accept:hover {
+  background: var(--accent-hover);
+}
+
+.inbox-item-btn.discard:hover {
+  background: var(--danger-color);
+  border-color: var(--danger-color);
+  color: white;
+}
+
+/* Change Nodes */
+.window-container.change-node {
+  border-color: var(--accent-cyan);
+  box-shadow: 0 12px 32px rgba(6, 182, 212, 0.15);
+}
+
+.window-container.change-node.focused {
+  border-color: var(--accent-cyan);
+  box-shadow: 0 16px 48px rgba(6, 182, 212, 0.3), 0 0 0 2px rgba(6, 182, 212, 0.25);
+}
+
+.change-feature-badge {
+  background: rgba(6, 182, 212, 0.15);
+  color: var(--accent-cyan);
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-size: 0.7rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin-right: 6px;
+}
+
+.artifact-link {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  background: var(--bg-primary);
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  color: var(--text-secondary);
+  font-size: 0.85rem;
+  cursor: pointer;
+  transition: all 0.15s;
+  margin-bottom: 8px;
+}
+
+.artifact-link:hover {
+  color: var(--text-primary);
+  border-color: var(--accent-color);
+  background: var(--bg-tertiary);
+}
+
+.artifact-link-icon {
+  color: var(--accent-color);
+}
+
+/* ----------------------------------------------------
+   Toolbar Mode Selector & Tool Buttons
+   ---------------------------------------------------- */
+.mode-selector {
+  display: flex;
+  align-items: center;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  padding: 2px;
+}
+
+.tool-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border: none;
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  border-radius: 6px;
+  transition: all 0.2s ease;
+}
+
+.tool-btn:hover {
+  background: var(--border-focus);
+  color: var(--text-primary);
+}
+
+.tool-btn.active {
+  background: var(--accent-color);
+  color: white;
+}
+
+/* ----------------------------------------------------
+   Marquee Selection Box & Selected Windows
+   ---------------------------------------------------- */
+.selection-box {
+  position: absolute;
+  border: 1.5px dashed var(--accent-color);
+  background: rgba(99, 102, 241, 0.12);
+  pointer-events: none;
+  z-index: 10000;
+  border-radius: 2px;
+}
+
+.window-container.selected {
+  border-color: var(--accent-color);
+  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.8), 0 0 0 2.5px var(--accent-color);
+}
+
+.window-title-input:disabled {
+  cursor: default;
+  pointer-events: none;
+  color: var(--text-primary);
+}
+
+
