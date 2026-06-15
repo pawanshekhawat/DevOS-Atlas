@@ -26,6 +26,12 @@ const db = new DatabaseSync(DB_PATH);
 
 // Initialize schema
 db.exec(`
+  CREATE TABLE IF NOT EXISTS projects (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL UNIQUE,
+    path TEXT NOT NULL
+  );
+
   CREATE TABLE IF NOT EXISTS features (
     id TEXT PRIMARY KEY,
     name TEXT NOT NULL UNIQUE
@@ -33,12 +39,16 @@ db.exec(`
 
   CREATE TABLE IF NOT EXISTS changes (
     id TEXT PRIMARY KEY,
+    project_id TEXT,
     feature_id TEXT,
     title TEXT NOT NULL,
     status TEXT NOT NULL,
     x REAL,
     y REAL,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    source_agent TEXT,
+    updated_at DATETIME,
+    FOREIGN KEY(project_id) REFERENCES projects(id),
     FOREIGN KEY(feature_id) REFERENCES features(id)
   );
 
@@ -57,6 +67,17 @@ db.exec(`
   );
 `);
 
+// Run SQLite migrations safely to handle legacy databases
+try {
+  db.exec(`ALTER TABLE changes ADD COLUMN project_id TEXT`);
+} catch (e) {}
+try {
+  db.exec(`ALTER TABLE changes ADD COLUMN source_agent TEXT`);
+} catch (e) {}
+try {
+  db.exec(`ALTER TABLE changes ADD COLUMN updated_at DATETIME`);
+} catch (e) {}
+
 // ----------------------------------------------------
 // Sync / Rebuild Database on Startup
 // ----------------------------------------------------
@@ -68,6 +89,7 @@ function rebuildIndex() {
   db.exec('DELETE FROM artifacts');
   db.exec('DELETE FROM changes');
   db.exec('DELETE FROM features');
+  db.exec('DELETE FROM projects');
 
   if (!fs.existsSync(CHANGES_DIR)) return;
 
@@ -83,6 +105,16 @@ function rebuildIndex() {
     try {
       const metadata = JSON.parse(fs.readFileSync(metaFile, 'utf8'));
       
+      // Upsert project
+      let projectId = null;
+      if (metadata.project_path) {
+        projectId = `proj_${metadata.project_name.toLowerCase().replace(/[^a-z0-9]/g, '_')}`;
+        const checkProj = db.prepare('SELECT id FROM projects WHERE id = ?').get(projectId);
+        if (!checkProj) {
+          db.prepare('INSERT INTO projects (id, name, path) VALUES (?, ?, ?)').run(projectId, metadata.project_name, metadata.project_path);
+        }
+      }
+
       // Upsert feature
       if (metadata.feature_id && metadata.feature_name) {
         const checkFeat = db.prepare('SELECT id FROM features WHERE id = ?').get(metadata.feature_id);
@@ -93,16 +125,19 @@ function rebuildIndex() {
 
       // Insert Change
       db.prepare(`
-        INSERT INTO changes (id, feature_id, title, status, x, y, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO changes (id, project_id, feature_id, title, status, x, y, created_at, source_agent, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
         metadata.id,
+        projectId,
         metadata.feature_id || null,
         metadata.title,
         metadata.status || 'completed',
         metadata.x !== undefined ? metadata.x : null,
         metadata.y !== undefined ? metadata.y : null,
-        metadata.created_at || new Date().toISOString()
+        metadata.created_at || new Date().toISOString(),
+        metadata.source_agent || 'Antigravity',
+        metadata.updated_at || metadata.created_at || new Date().toISOString()
       );
 
       // Read files in folder to add as artifacts
@@ -137,25 +172,222 @@ rebuildIndex();
 // ----------------------------------------------------
 // In-Memory Staging Inbox & File Watching
 // ----------------------------------------------------
-let inbox = []; // List of { id, conversationId, timestamp, planPath, tasksPath, walkthroughPath, title }
-
-// Watchers state
+// ----------------------------------------------------
+// In-Memory Staging Inbox & Pluggable File Watching
+// ----------------------------------------------------
+const crypto = require('crypto');
+let inbox = []; // List of inbox items
 let activeWatchers = [];
 
+// Pluggable Agent Provider Registry
+const providers = {
+  antigravity: {
+    detectProject(filePath, logContent) {
+      if (!logContent) return null;
+      // 1. Search for Cwd references
+      const cwdMatch = logContent.match(/"Cwd"\s*:\s*"([^"]+)"/i);
+      if (cwdMatch && cwdMatch[1]) {
+        const fullPath = cwdMatch[1].replace(/\\\\/g, '/').replace(/\\/g, '/');
+        return {
+          path: fullPath,
+          name: path.basename(fullPath)
+        };
+      }
+      // 2. Fallback: Search for workspace layout mapping in logs
+      const workspaceMatch = logContent.match(/([a-zA-Z]:[\\/][^-\r\n\s\t"]+)\s*->/i);
+      if (workspaceMatch && workspaceMatch[1]) {
+        const fullPath = workspaceMatch[1].replace(/\\\\/g, '/').replace(/\\/g, '/');
+        return {
+          path: fullPath,
+          name: path.basename(fullPath)
+        };
+      }
+      return null;
+    },
+    parseMetadata(filePath, fileContent) {
+      let title = null;
+      if (fileContent) {
+        const match = fileContent.match(/^#\s+(.+)$/m);
+        if (match && match[1]) {
+          title = match[1].trim();
+        }
+      }
+      return {
+        title: title || `Change via Antigravity`,
+        sourceAgent: 'Antigravity'
+      };
+    }
+  },
+  cursor: {
+    detectProject(filePath, logContent) { return null; },
+    parseMetadata(filePath, fileContent) {
+      return { title: 'Cursor Change', sourceAgent: 'Cursor' };
+    }
+  },
+  claude_code: {
+    detectProject(filePath, logContent) { return null; },
+    parseMetadata(filePath, fileContent) {
+      return { title: 'Claude Code Change', sourceAgent: 'Claude Code' };
+    }
+  }
+};
+
+function initializeWorkspaceIdentity() {
+  let config = {};
+  if (fs.existsSync(CONFIG_PATH)) {
+    try {
+      config = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'));
+    } catch (e) {
+      config = {};
+    }
+  }
+
+  let updated = false;
+  if (!config.workspaceId) {
+    config.workspaceId = crypto.randomUUID();
+    updated = true;
+  }
+  if (!config.workspaceName) {
+    config.workspaceName = path.basename(WORKSPACE_DIR);
+    updated = true;
+  }
+  if (!config.createdAt) {
+    config.createdAt = new Date().toISOString();
+    updated = true;
+  }
+  if (config.version === undefined) {
+    config.version = 1;
+    updated = true;
+  }
+  if (!config.watchers || !Array.isArray(config.watchers)) {
+    const homeDir = process.env.USERPROFILE || process.env.HOME || 'C:\\Users\\minec';
+    const defaultBrainPath = path.join(homeDir, '.gemini', 'antigravity-ide', 'brain');
+    config.watchers = [
+      {
+        type: "antigravity",
+        path: defaultBrainPath
+      }
+    ];
+    updated = true;
+  }
+
+  if (updated) {
+    fs.writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2), 'utf8');
+    console.log(`Workspace identity initialized: ID=${config.workspaceId}, Name=${config.workspaceName}`);
+  }
+  return config;
+}
+
+function scanBrainFolderForInbox() {
+  const config = initializeWorkspaceIdentity();
+  if (!config.watchers || !Array.isArray(config.watchers)) return;
+
+  config.watchers.forEach(w => {
+    if (w.type !== 'antigravity' || !w.path || !fs.existsSync(w.path)) return;
+
+    try {
+      const folders = fs.readdirSync(w.path);
+      for (const folder of folders) {
+        const conversationId = folder;
+        const convFolder = path.join(w.path, folder);
+        if (!fs.statSync(convFolder).isDirectory()) continue;
+
+        const planPath = path.join(convFolder, 'implementation_plan.md');
+        const tasksPath = path.join(convFolder, 'task.md');
+        const walkthroughPath = path.join(convFolder, 'walkthrough.md');
+
+        const filesExist = fs.existsSync(planPath) || fs.existsSync(tasksPath) || fs.existsSync(walkthroughPath);
+        if (!filesExist) continue;
+
+        const transcriptPath = path.join(convFolder, '.system_generated', 'logs', 'transcript.jsonl');
+        let logContent = '';
+        if (fs.existsSync(transcriptPath)) {
+          try {
+            logContent = fs.readFileSync(transcriptPath, 'utf8');
+          } catch (e) {}
+        }
+
+        const provider = providers.antigravity;
+        const projectInfo = provider.detectProject(planPath, logContent);
+        
+        let projectPath = WORKSPACE_DIR.replace(/\\/g, '/');
+        let projectName = path.basename(WORKSPACE_DIR);
+        if (projectInfo) {
+          projectPath = projectInfo.path;
+          projectName = projectInfo.name;
+        }
+
+        let fileContent = '';
+        const mdFile = [planPath, tasksPath, walkthroughPath].find(fs.existsSync);
+        if (mdFile) {
+          try {
+            fileContent = fs.readFileSync(mdFile, 'utf8');
+          } catch (e) {}
+        }
+
+        const meta = provider.parseMetadata(mdFile, fileContent);
+        const title = meta ? meta.title : `Change in ${projectName}`;
+        const sourceAgent = meta ? meta.sourceAgent : 'Antigravity';
+
+        const mtimes = [];
+        const birthtimes = [];
+        [planPath, tasksPath, walkthroughPath].forEach(p => {
+          if (fs.existsSync(p)) {
+            const stat = fs.statSync(p);
+            mtimes.push(stat.mtimeMs);
+            birthtimes.push(stat.birthtimeMs);
+          }
+        });
+
+        const createdAt = birthtimes.length ? Math.min(...birthtimes) : Date.now();
+        const updatedAt = mtimes.length ? Math.max(...mtimes) : createdAt;
+
+        const entryId = `inbox_${conversationId}`;
+        let entry = inbox.find(item => item.id === entryId);
+        
+        if (!entry) {
+          entry = {
+            id: entryId,
+            conversationId: conversationId,
+            planPath: fs.existsSync(planPath) ? planPath : null,
+            tasksPath: fs.existsSync(tasksPath) ? tasksPath : null,
+            walkthroughPath: fs.existsSync(walkthroughPath) ? walkthroughPath : null,
+          };
+          inbox.push(entry);
+        } else {
+          entry.planPath = fs.existsSync(planPath) ? planPath : entry.planPath;
+          entry.tasksPath = fs.existsSync(tasksPath) ? tasksPath : entry.tasksPath;
+          entry.walkthroughPath = fs.existsSync(walkthroughPath) ? walkthroughPath : entry.walkthroughPath;
+        }
+
+        entry.title = title;
+        entry.sourceAgent = sourceAgent;
+        entry.projectName = projectName;
+        entry.projectPath = projectPath;
+        entry.createdAt = createdAt;
+        entry.updatedAt = updatedAt;
+      }
+    } catch (err) {
+      console.error('Error scanning brain folder:', err);
+    }
+  });
+
+  inbox.sort((a, b) => {
+    if (b.createdAt !== a.createdAt) {
+      return b.createdAt - a.createdAt;
+    }
+    return b.updatedAt - a.updatedAt;
+  });
+}
+
 function loadConfigAndStartWatchers() {
-  // Clear any existing watchers
   activeWatchers.forEach(w => w.close());
   activeWatchers = [];
 
-  if (!fs.existsSync(CONFIG_PATH)) {
-    console.log('No config.json found at .atlas/config.json. Watchers disabled.');
-    return;
-  }
+  const config = initializeWorkspaceIdentity();
+  if (!config.watchers || !Array.isArray(config.watchers)) return;
 
   try {
-    const config = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'));
-    if (!config.watchers || !Array.isArray(config.watchers)) return;
-
     config.watchers.forEach((w, idx) => {
       if (w.type === 'antigravity' && w.path) {
         console.log(`Starting Antigravity watcher for path: ${w.path}`);
@@ -178,86 +410,12 @@ function loadConfigAndStartWatchers() {
   }
 }
 
-// Analyze file changes to identify possible logical workflow steps
 function handleAgentFileEvent(filePath) {
   const fileName = path.basename(filePath);
   if (!['implementation_plan.md', 'task.md', 'walkthrough.md'].includes(fileName)) {
     return;
   }
-
-  // Determine conversation folder from path
-  const parts = filePath.split(path.sep);
-  // Expected: .../brain/<conversation-id>/<file>
-  // Let's find conversation id
-  const brainIndex = parts.findIndex(p => p.toLowerCase() === 'brain');
-  if (brainIndex === -1 || brainIndex >= parts.length - 2) return;
-
-  const conversationId = parts[brainIndex + 1];
-  
-  // Verify this conversation references the current workspace directory
-  // We can scan the conversation folder logs for references to the workspace path.
-  // For V1, to make it frictionless, we link it if it's the most recent conversation
-  // or contains workspace path. Let's do a simple check.
-  const logDir = path.join(path.dirname(filePath), '.system_generated', 'logs');
-  const transcriptPath = path.join(logDir, 'transcript.jsonl');
-  let isRelated = false;
-
-  if (fs.existsSync(transcriptPath)) {
-    try {
-      const content = fs.readFileSync(transcriptPath, 'utf8');
-      if (content.toLowerCase().includes(WORKSPACE_DIR.toLowerCase())) {
-        isRelated = true;
-      }
-    } catch (e) {
-      // Fallback
-    }
-  }
-
-  // If not explicitly related, check if any of the files in the directory are newer
-  if (!isRelated) {
-    // We can allow it as a candidate or check if there is a match in active workspace
-    isRelated = true; // For local single-user testing, default to true
-  }
-
-  if (!isRelated) return;
-
-  // Locate or create Inbox entry
-  let entry = inbox.find(item => item.conversationId === conversationId);
-  
-  if (!entry) {
-    entry = {
-      id: `inbox_${conversationId}`,
-      conversationId: conversationId,
-      timestamp: Date.now(),
-      planPath: null,
-      tasksPath: null,
-      walkthroughPath: null,
-      title: `Change via Chat ${conversationId.slice(0, 8)}`
-    };
-    inbox.push(entry);
-  }
-
-  // Update file reference paths
-  if (fileName === 'implementation_plan.md') {
-    entry.planPath = filePath;
-    // Try to extract a title from the implementation plan's first heading
-    try {
-      const content = fs.readFileSync(filePath, 'utf8');
-      const match = content.match(/^#\s+(.+)$/m);
-      if (match && match[1]) {
-        entry.title = match[1].trim();
-      }
-    } catch (e) {
-      // Ignored
-    }
-  } else if (fileName === 'task.md') {
-    entry.tasksPath = filePath;
-  } else if (fileName === 'walkthrough.md') {
-    entry.walkthroughPath = filePath;
-  }
-
-  entry.timestamp = Date.now();
-  console.log(`Updated Inbox candidate [${entry.id}]: "${entry.title}"`);
+  scanBrainFolderForInbox();
 }
 
 // ----------------------------------------------------
@@ -268,6 +426,7 @@ app.use(express.json());
 
 // Serve Static Frontend files (Vite build output or public folder if building)
 app.use(express.static(WORKSPACE_DIR));
+app.use('/.atlas', express.static(ATLAS_DIR, { dotfiles: 'allow' }));
 
 // CORS headers
 app.use((req, res, next) => {
@@ -282,7 +441,9 @@ app.get('/api/changes', (req, res) => {
   try {
     const changes = db.prepare('SELECT * FROM changes ORDER BY created_at ASC').all();
     const features = db.prepare('SELECT * FROM features').all();
+    const projects = db.prepare('SELECT * FROM projects').all();
     const artifacts = db.prepare('SELECT * FROM artifacts').all();
+    const config = initializeWorkspaceIdentity();
     
     // Map artifact relative path to full URL
     const mappedArtifacts = artifacts.map(art => ({
@@ -294,29 +455,42 @@ app.get('/api/changes', (req, res) => {
       success: true,
       changes: changes,
       features: features,
-      artifacts: mappedArtifacts
+      projects: projects,
+      artifacts: mappedArtifacts,
+      config: config
     });
   } catch (e) {
     res.status(500).json({ success: false, error: e.message });
   }
 });
 
-// API Endpoint: Get pending staging inbox items
-app.get('/api/inbox', (req, res) => {
-  // Filter out inbox items that have already been accepted
-  // (We check if their plan or tasks files are already registered in DB)
-  const activeArtifactPaths = db.prepare('SELECT path FROM artifacts').all().map(a => a.path);
-  
-  const pending = inbox.filter(item => {
-    // If we already accepted this conversation, skip
+function getFilteredInbox() {
+  return inbox.filter(item => {
     const checkChange = db.prepare('SELECT id FROM changes WHERE id = ?').get(`change_${item.conversationId}`);
     return !checkChange;
   });
+}
 
+// API Endpoint: Get pending staging inbox items
+app.get('/api/inbox', (req, res) => {
+  scanBrainFolderForInbox();
   res.json({
     success: true,
-    inbox: pending
+    inbox: getFilteredInbox()
   });
+});
+
+// API Endpoint: Force refresh staging inbox items manually
+app.post('/api/inbox/refresh', (req, res) => {
+  try {
+    scanBrainFolderForInbox();
+    res.json({
+      success: true,
+      inbox: getFilteredInbox()
+    });
+  } catch (e) {
+    res.status(500).json({ success: false, error: e.message });
+  }
 });
 
 // API Endpoint: Accept pending change
@@ -365,7 +539,11 @@ app.post('/api/inbox/accept', (req, res) => {
       status: 'completed',
       x: 100 + Math.random() * 200,
       y: 100 + Math.random() * 200,
-      created_at: new Date().toISOString()
+      created_at: new Date(item.createdAt).toISOString(),
+      updated_at: new Date(item.updatedAt).toISOString(),
+      project_name: item.projectName,
+      project_path: item.projectPath,
+      source_agent: item.sourceAgent
     };
     fs.writeFileSync(path.join(changeFolder, 'change.json'), JSON.stringify(metadata, null, 2));
 

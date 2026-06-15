@@ -249,6 +249,10 @@ function createChangeNodeDOM(change, changeArtifacts) {
   const feature = state.features.find(f => f.id === change.feature_id);
   const featureBadge = feature ? `<span class="change-feature-badge">${escapeHtml(feature.name)}</span>` : '';
 
+  // Find project details
+  const project = state.projects ? state.projects.find(p => p.id === change.project_id) : null;
+  const projectBadge = project ? `<span class="badge-project" title="Path: ${escapeHtml(project.path)}">[${escapeHtml(project.name)}]</span>` : '';
+
   let artifactsHtml = '';
   changeArtifacts.forEach(art => {
     let typeLabel = art.type.toUpperCase();
@@ -264,6 +268,7 @@ function createChangeNodeDOM(change, changeArtifacts) {
     <div class="window-header" data-id="${change.id}">
       <div class="window-title-area">
         ${featureBadge}
+        ${projectBadge}
         <span style="font-weight: 600; font-size: 13px; color: var(--text-primary); text-overflow: ellipsis; overflow: hidden; white-space: nowrap;">${escapeHtml(change.title)}</span>
       </div>
     </div>
@@ -401,11 +406,19 @@ function syncWithServer() {
           f.id = String(f.id);
           return f;
         });
+        state.projects = data.projects || [];
         state.artifacts = (data.artifacts || []).map(art => {
           art.id = String(art.id);
           art.change_id = String(art.change_id);
           return art;
         });
+
+        // Set workspace identity if available from server config
+        if (data.config) {
+          state.workspaceId = data.config.workspaceId;
+          state.workspaceName = data.config.workspaceName;
+          state.createdAt = data.config.createdAt;
+        }
         
         renderChangeNodes();
       }
@@ -442,6 +455,20 @@ function renderChangeNodes() {
   });
 }
 
+function formatRelativeTime(timestamp) {
+  if (!timestamp) return 'unknown';
+  const diff = Date.now() - timestamp;
+  const secs = Math.floor(diff / 1000);
+  const mins = Math.floor(secs / 60);
+  const hours = Math.floor(mins / 60);
+  const days = Math.floor(hours / 24);
+
+  if (secs < 60) return 'Just now';
+  if (mins < 60) return `${mins}m ago`;
+  if (hours < 24) return `${hours}h ago`;
+  return `${days}d ago`;
+}
+
 function renderInboxList(inboxItems) {
   const inboxListEl = document.getElementById('inbox-list');
   const badgeEl = document.getElementById('inbox-badge');
@@ -466,7 +493,14 @@ function renderInboxList(inboxItems) {
     if (item.tasksPath) filesList += `<div class="inbox-item-file"><span class="inbox-item-file-dot"></span>Tasks</div>`;
     if (item.walkthroughPath) filesList += `<div class="inbox-item-file"><span class="inbox-item-file-dot"></span>Walkthrough</div>`;
 
+    const timeAgoStr = formatRelativeTime(item.updatedAt);
+
     li.innerHTML = `
+      <div class="inbox-item-meta">
+        <span class="badge-agent" title="Source Agent: ${escapeHtml(item.sourceAgent)}">${escapeHtml(item.sourceAgent)}</span>
+        <span class="badge-project" title="Full Path: ${escapeHtml(item.projectPath)}">${escapeHtml(item.projectName)}</span>
+        <span class="inbox-item-time">${escapeHtml(timeAgoStr)}</span>
+      </div>
       <div class="inbox-item-title">${escapeHtml(item.title)}</div>
       <div class="inbox-item-files">${filesList}</div>
       <div class="inbox-item-actions">
@@ -1568,9 +1602,131 @@ function init() {
     }
   });
 
+  // Window Focus event auto-refresh
+  window.addEventListener('focus', () => {
+    syncWithServer();
+  });
+
+  // Manual Refresh Button Listener
+  const refreshInboxBtn = document.getElementById('refresh-inbox-btn');
+  if (refreshInboxBtn) {
+    refreshInboxBtn.addEventListener('click', () => {
+      refreshInboxBtn.style.transform = 'rotate(180deg)';
+      refreshInboxBtn.style.transition = 'transform 0.5s ease';
+      
+      fetch('http://localhost:3000/api/inbox/refresh', { method: 'POST' })
+        .then(res => res.json())
+        .then(data => {
+          setTimeout(() => {
+            refreshInboxBtn.style.transform = 'none';
+          }, 500);
+          if (data.success) {
+            syncWithServer();
+          }
+        })
+        .catch(err => {
+          refreshInboxBtn.style.transform = 'none';
+          console.error("Refresh failed:", err);
+        });
+    });
+  }
+
+  // Export Workspace Action
+  const exportBtn = document.getElementById('export-workspace-btn');
+  if (exportBtn) {
+    exportBtn.addEventListener('click', () => {
+      exportWorkspace();
+    });
+  }
+
+  // Import Workspace Action
+  const importBtn = document.getElementById('import-workspace-btn');
+  const workspaceFileInput = document.getElementById('workspace-file-input');
+  if (importBtn && workspaceFileInput) {
+    importBtn.addEventListener('click', () => {
+      workspaceFileInput.click();
+    });
+    workspaceFileInput.addEventListener('change', (e) => {
+      if (e.target.files.length > 0) {
+        importWorkspace(e.target.files[0]);
+      }
+    });
+  }
+
   // Start periodic sync polling
   syncWithServer();
   setInterval(syncWithServer, 4000);
+}
+
+function exportWorkspace() {
+  const workspaceName = state.workspaceName || 'canvas';
+  const exportData = {
+    workspaceId: state.workspaceId || 'uuid-placeholder',
+    workspaceName: workspaceName,
+    createdAt: state.createdAt || new Date().toISOString(),
+    version: 1,
+    pan: state.pan,
+    zoom: state.zoom,
+    theme: state.theme,
+    windows: state.windows
+  };
+
+  const dataStr = JSON.stringify(exportData, null, 2);
+  const blob = new Blob([dataStr], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = `${workspaceName.toLowerCase().replace(/[^a-z0-9]/g, '_')}.atlas.json`;
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+  URL.revokeObjectURL(url);
+}
+
+function importWorkspace(file) {
+  const reader = new FileReader();
+  reader.onload = function(e) {
+    try {
+      const data = JSON.parse(e.target.result);
+      if (!data.workspaceId || !data.windows) {
+        alert("Invalid workspace file format. Missing workspaceId or windows.");
+        return;
+      }
+      
+      if (confirm(`Load workspace "${data.workspaceName || 'Untitled'}"? This will replace your current notes layout.`)) {
+        // Remove standard card DOM containers
+        document.querySelectorAll('.window-container').forEach(el => {
+          if (!el.classList.contains('change-node')) {
+            el.remove();
+          }
+        });
+
+        state.workspaceId = data.workspaceId;
+        state.workspaceName = data.workspaceName;
+        state.pan = data.pan || { x: 100, y: 100 };
+        state.zoom = data.zoom || 1.0;
+        state.theme = data.theme || 'dark';
+        
+        state.windows = (data.windows || []).map(w => {
+          w.id = String(w.id);
+          return w;
+        });
+
+        applyTheme();
+        updateTransform();
+
+        state.windows.forEach(w => createWindowDOM(w));
+
+        updateSidebar();
+        toggleOnboarding();
+        saveState();
+      }
+    } catch (err) {
+      alert("Failed to parse workspace file: " + err.message);
+    }
+  };
+  reader.readAsText(file);
 }
 
 function adjustZoomCenter(ratio) {

@@ -111,6 +111,17 @@
         <span>New Note</span>
       </button>
     </div>
+    <div class="sidebar-actions" style="margin-top: 8px; border-top: 1px solid var(--border-color); padding-top: 8px;">
+      <button id="export-workspace-btn" class="text-action-btn tooltip" data-tooltip="Save canvas as .atlas.json file">
+        <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+        <span>Export Workspace</span>
+      </button>
+      <button id="import-workspace-btn" class="text-action-btn tooltip" data-tooltip="Load .atlas.json canvas file">
+        <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+        <span>Import Workspace</span>
+      </button>
+      <input type="file" id="workspace-file-input" accept=".atlas.json" style="display: none;">
+    </div>
     <ul id="file-list" class="file-list">
       <!-- File list items will be generated dynamically -->
     </ul>
@@ -176,7 +187,12 @@
   <aside id="inbox-sidebar" class="sidebar sidebar-right">
     <div class="sidebar-header">
       <h3>Staging Inbox</h3>
-      <button id="close-inbox-btn" class="icon-btn small">✕</button>
+      <div style="display: flex; gap: 8px; align-items: center;">
+        <button id="refresh-inbox-btn" class="icon-btn small tooltip" data-tooltip="Refresh Inbox" style="padding: 4px; display: flex; align-items: center; justify-content: center; background: transparent; border: none; cursor: pointer; color: var(--text-color);">
+          <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67"/></svg>
+        </button>
+        <button id="close-inbox-btn" class="icon-btn small">✕</button>
+      </div>
     </div>
     <div class="sidebar-desc" style="padding: 0 16px 12px 16px; font-size: 13px; color: var(--text-muted); border-bottom: 1px solid var(--border-color);">
       Pending agent changes detected. Review and accept them to add to the visual timeline canvas.
