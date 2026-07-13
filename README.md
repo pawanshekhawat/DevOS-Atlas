@@ -22,6 +22,9 @@ DevOS Atlas is a visual, canvas-based Markdown workspace application designed fo
 - **File Explorer Sidebar**: Collapsible file explorer with search functionality to quickly find and focus documents.
 - **State Persistence**: Your workspace is automatically saved to local storage so you never lose your layout.
 - **Import/Export**: Drag & drop `.md` files onto the workspace or upload them via the header to populate the canvas.
+- **Shareable Canvas Link**: Share your current visual workspace layout with anyone by generating a unique link. When opened, it imports the notes, pan/zoom levels, and expanded/hidden change node states.
+- **Empty State Paste Text Option**: Paste raw Markdown text directly when the canvas is empty to create a note card instantly.
+- **Toast Notifications**: Interactive status alerts that slide up in the bottom-right corner for action feedback (copying links, successful sharing, etc.).
 
 ## Getting Started
 
@@ -52,6 +55,11 @@ You need [Node.js](https://nodejs.org/) installed to run the local development s
    npm run build
    ```
 
+## Contributing
+
+DevOS Atlas is open-source! We welcome anyone to contribute, add new features, and fix bugs. Feel free to open issues or submit pull requests to help improve the workspace.
+
 ## License
 
 MIT License. See LICENSE for details.
+
