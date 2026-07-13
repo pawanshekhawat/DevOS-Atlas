@@ -2976,6 +2976,10 @@ function init() {
       loadSharedCanvas(shareId);
     }, 400);
   }
+
+  // Initialize mobile touch gestures
+  initTouchToMouseMapping();
+  initPinchToZoom();
 }
 
 function exportWorkspace() {
@@ -3211,6 +3215,116 @@ function adjustZoomCenter(ratio) {
 
   updateTransform();
   saveState();
+}
+
+function initTouchToMouseMapping() {
+  function touchHandler(event) {
+    const touches = event.changedTouches;
+    if (!touches || touches.length === 0) return;
+    const first = touches[0];
+    let type = "";
+
+    switch (event.type) {
+      case "touchstart": 
+        type = "mousedown"; 
+        break;
+      case "touchmove":  
+        type = "mousemove"; 
+        break;        
+      case "touchend":   
+        type = "mouseup"; 
+        break;
+      default: 
+        return;
+    }
+
+    // Don't convert multi-touch gestures (e.g. pinch zoom)
+    if (event.touches.length > 1) {
+      return; 
+    }
+
+    const simulatedEvent = new MouseEvent(type, {
+      bubbles: true,
+      cancelable: true,
+      view: window,
+      detail: 1,
+      screenX: first.screenX,
+      screenY: first.screenY,
+      clientX: first.clientX,
+      clientY: first.clientY,
+      ctrlKey: event.ctrlKey,
+      altKey: event.altKey,
+      shiftKey: event.shiftKey,
+      metaKey: event.metaKey,
+      button: 0,
+      buttons: 1,
+      relatedTarget: null
+    });
+
+    first.target.dispatchEvent(simulatedEvent);
+    
+    // Prevent default scrolling on canvas (allow inside notes)
+    const isInteractive = event.target.tagName === 'TEXTAREA' || event.target.tagName === 'INPUT' || event.target.closest('.window-body');
+    if (!isInteractive) {
+      event.preventDefault();
+    }
+  }
+
+  document.addEventListener("touchstart", touchHandler, { passive: false });
+  document.addEventListener("touchmove", touchHandler, { passive: false });
+  document.addEventListener("touchend", touchHandler, { passive: false });
+}
+
+function initPinchToZoom() {
+  let initialTouchDist = 0;
+  let initialZoom = 1;
+
+  canvasContainer.addEventListener('touchstart', (e) => {
+    if (e.touches.length === 2) {
+      const dx = e.touches[0].clientX - e.touches[1].clientX;
+      const dy = e.touches[0].clientY - e.touches[1].clientY;
+      initialTouchDist = Math.sqrt(dx * dx + dy * dy);
+      initialZoom = state.zoom;
+    }
+  }, { passive: true });
+
+  canvasContainer.addEventListener('touchmove', (e) => {
+    if (e.touches.length === 2 && initialTouchDist > 0) {
+      e.preventDefault();
+      const dx = e.touches[0].clientX - e.touches[1].clientX;
+      const dy = e.touches[0].clientY - e.touches[1].clientY;
+      const dist = Math.sqrt(dx * dx + dy * dy);
+      
+      const factor = dist / initialTouchDist;
+      let nextZoom = initialZoom * factor;
+      nextZoom = Math.max(0.1, Math.min(3.0, nextZoom));
+      
+      const touch1 = e.touches[0];
+      const touch2 = e.touches[1];
+      const midX = (touch1.clientX + touch2.clientX) / 2;
+      const midY = (touch1.clientY + touch2.clientY) / 2;
+      
+      const rect = canvasContainer.getBoundingClientRect();
+      const screenX = midX - rect.left;
+      const screenY = midY - rect.top;
+      
+      const canvasX = (screenX - state.pan.x) / state.zoom;
+      const canvasY = (screenY - state.pan.y) / state.zoom;
+      
+      state.zoom = nextZoom;
+      state.pan.x = screenX - canvasX * state.zoom;
+      state.pan.y = screenY - canvasY * state.zoom;
+      
+      updateTransform();
+      saveState();
+    }
+  }, { passive: false });
+
+  canvasContainer.addEventListener('touchend', (e) => {
+    if (e.touches.length < 2) {
+      initialTouchDist = 0;
+    }
+  }, { passive: true });
 }
 
 // Run loader
