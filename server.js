@@ -465,7 +465,10 @@ const app = express();
 app.use(express.json());
 
 // Serve Static Frontend files (Vite build output or public folder if building)
-app.use(express.static(WORKSPACE_DIR));
+const STATIC_DIR = fs.existsSync(path.join(WORKSPACE_DIR, 'dist'))
+  ? path.join(WORKSPACE_DIR, 'dist')
+  : WORKSPACE_DIR;
+app.use(express.static(STATIC_DIR));
 app.use('/.atlas', express.static(ATLAS_DIR, { dotfiles: 'allow' }));
 
 // CORS headers
