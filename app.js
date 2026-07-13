@@ -48,6 +48,11 @@ window.y = windowStartY + dy;
 *Created with love. Switch to the edit tab (📝) in the header to modify this file!*
 `;
 
+// Resolve API Base URL dynamically for local dev and production
+const API_BASE = (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1' || window.location.hostname === '[::1]') && window.location.port !== '3000'
+  ? 'http://localhost:3000'
+  : window.location.origin;
+
 // State definition
 let state = {
   pan: { x: 100, y: 100 },
@@ -582,7 +587,7 @@ function collapseFeature(changeId) {
       const currentX = parseFloat(el.style.left) || 0;
       const currentY = parseFloat(el.style.top) || 0;
       // Persist position for next expand
-      fetch('http://localhost:3000/api/artifacts/layout', {
+      fetch(`${API_BASE}/api/artifacts/layout`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ id: art.id, changeId: changeId, type: art.type, x: currentX, y: currentY })
@@ -978,7 +983,7 @@ function setupArtifactCardEventListeners(winEl, art, change) {
     debounceTimer = setTimeout(() => {
       renderArtifactMarkdown(art, winEl);
 
-      fetch('http://localhost:3000/api/artifacts/content', {
+      fetch(`${API_BASE}/api/artifacts/content`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -1291,7 +1296,7 @@ function renderChangeNodes() {
 }
 
 function syncWithServer() {
-  fetch('http://localhost:3000/api/changes')
+  fetch(`${API_BASE}/api/changes`)
     .then(res => res.json())
     .then(data => {
       if (data.success) {
@@ -1327,7 +1332,7 @@ function syncWithServer() {
     });
 
   if (isServerConnected) {
-    fetch('http://localhost:3000/api/inbox')
+    fetch(`${API_BASE}/api/inbox`)
       .then(res => res.json())
       .then(data => {
         if (data.success) {
@@ -1438,7 +1443,7 @@ function renderInboxList(inboxItems) {
     li.querySelector('.discard-inbox-btn').addEventListener('click', (e) => {
       const inboxId = e.currentTarget.getAttribute('data-id');
       if (confirm("Discard this change candidate?")) {
-        fetch('http://localhost:3000/api/inbox/discard', {
+        fetch(`${API_BASE}/api/inbox/discard`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ id: inboxId })
@@ -2439,7 +2444,7 @@ function init() {
       if (isServerConnected) {
         activeDrag.selectedWins.forEach(item => {
           if (item.isFeatureNode || item.isChangeNode) {
-            fetch('http://localhost:3000/api/changes/layout', {
+            fetch(`${API_BASE}/api/changes/layout`, {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({
@@ -2449,7 +2454,7 @@ function init() {
               })
             }).catch(err => console.error("Failed to save coordinates:", err));
           } else if (item.isArtifact) {
-            fetch('http://localhost:3000/api/artifacts/layout', {
+            fetch(`${API_BASE}/api/artifacts/layout`, {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({
@@ -2470,7 +2475,7 @@ function init() {
                 const currentY = parseFloat(sibEl.style.top) || sib.y;
                 sib.x = currentX;
                 sib.y = currentY;
-                fetch('http://localhost:3000/api/artifacts/layout', {
+                fetch(`${API_BASE}/api/artifacts/layout`, {
                   method: 'POST',
                   headers: { 'Content-Type': 'application/json' },
                   body: JSON.stringify({
@@ -2721,7 +2726,7 @@ function init() {
     const newX = maxX > 0 ? maxX + 70 : 100;
     const newY = targetY;
 
-    fetch('http://localhost:3000/api/inbox/accept', {
+    fetch(`${API_BASE}/api/inbox/accept`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -2796,7 +2801,7 @@ function init() {
         filteredItems.forEach((item, index) => {
           const nextX = startX + index * 350; // 280px width + 70px spacing
           chain = chain.then(() => {
-            return fetch('http://localhost:3000/api/inbox/accept', {
+            return fetch(`${API_BASE}/api/inbox/accept`, {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({
@@ -2830,7 +2835,7 @@ function init() {
       refreshInboxBtn.style.transform = 'rotate(180deg)';
       refreshInboxBtn.style.transition = 'transform 0.5s ease';
       
-      fetch('http://localhost:3000/api/inbox/refresh', { method: 'POST' })
+      fetch(`${API_BASE}/api/inbox/refresh`, { method: 'POST' })
         .then(res => res.json())
         .then(data => {
           setTimeout(() => {
@@ -3101,7 +3106,7 @@ function shareWorkspace() {
     expandedChangeId: expandedChangeId || null
   };
 
-  fetch('http://localhost:3000/api/share', {
+  fetch(`${API_BASE}/api/share`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json'
@@ -3130,7 +3135,7 @@ function shareWorkspace() {
 }
 
 function loadSharedCanvas(shareId) {
-  fetch(`http://localhost:3000/api/share/${shareId}`)
+  fetch(`${API_BASE}/api/share/${shareId}`)
     .then(res => res.json())
     .then(data => {
       if (data.success && data.state) {
