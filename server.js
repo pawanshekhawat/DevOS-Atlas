@@ -57,6 +57,8 @@ db.exec(`
     change_id TEXT NOT NULL,
     type TEXT NOT NULL,
     path TEXT NOT NULL,
+    x REAL,
+    y REAL,
     FOREIGN KEY(change_id) REFERENCES changes(id)
   );
 
@@ -64,6 +66,12 @@ db.exec(`
     from_change TEXT,
     to_change TEXT,
     PRIMARY KEY (from_change, to_change)
+  );
+
+  CREATE TABLE IF NOT EXISTS shared_canvases (
+    id TEXT PRIMARY KEY,
+    state_json TEXT NOT NULL,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
   );
 `);
 
@@ -76,6 +84,12 @@ try {
 } catch (e) {}
 try {
   db.exec(`ALTER TABLE changes ADD COLUMN updated_at DATETIME`);
+} catch (e) {}
+try {
+  db.exec(`ALTER TABLE artifacts ADD COLUMN x REAL`);
+} catch (e) {}
+try {
+  db.exec(`ALTER TABLE artifacts ADD COLUMN y REAL`);
 } catch (e) {}
 
 // ----------------------------------------------------
@@ -154,10 +168,30 @@ function rebuildIndex() {
         const artifactId = `art_${metadata.id}_${type}`;
         const relativePath = path.join('.atlas', 'changes', folder, file).replace(/\\/g, '/');
 
+        let x = null;
+        let y = null;
+        if (metadata.layout && metadata.layout[type]) {
+          x = metadata.layout[type].x;
+          y = metadata.layout[type].y;
+        } else {
+          const baseChangeX = metadata.x !== undefined && metadata.x !== null ? metadata.x : 100;
+          const baseChangeY = metadata.y !== undefined && metadata.y !== null ? metadata.y : 100;
+          if (type === 'plan') {
+            x = baseChangeX;
+            y = baseChangeY + 300;
+          } else if (type === 'tasks') {
+            x = baseChangeX + 800;
+            y = baseChangeY + 300;
+          } else if (type === 'walkthrough') {
+            x = baseChangeX + 1500;
+            y = baseChangeY + 300;
+          }
+        }
+
         db.prepare(`
-          INSERT INTO artifacts (id, change_id, type, path)
-          VALUES (?, ?, ?, ?)
-        `).run(artifactId, metadata.id, type, relativePath);
+          INSERT INTO artifacts (id, change_id, type, path, x, y)
+          VALUES (?, ?, ?, ?, ?, ?)
+        `).run(artifactId, metadata.id, type, relativePath, x, y);
       }
     } catch (e) {
       console.error(`Failed to process change metadata in folder ${folder}:`, e);
@@ -184,23 +218,29 @@ const providers = {
   antigravity: {
     detectProject(filePath, logContent) {
       if (!logContent) return null;
-      // 1. Search for Cwd references
-      const cwdMatch = logContent.match(/"Cwd"\s*:\s*"([^"]+)"/i);
-      if (cwdMatch && cwdMatch[1]) {
-        const fullPath = cwdMatch[1].replace(/\\\\/g, '/').replace(/\\/g, '/');
-        return {
-          path: fullPath,
-          name: path.basename(fullPath)
-        };
-      }
-      // 2. Fallback: Search for workspace layout mapping in logs
-      const workspaceMatch = logContent.match(/([a-zA-Z]:[\\/][^-\r\n\s\t"]+)\s*->/i);
-      if (workspaceMatch && workspaceMatch[1]) {
-        const fullPath = workspaceMatch[1].replace(/\\\\/g, '/').replace(/\\/g, '/');
-        return {
-          path: fullPath,
-          name: path.basename(fullPath)
-        };
+      const lines = logContent.split('\n');
+      for (const line of lines) {
+        if (!line.trim()) continue;
+        try {
+          const parsed = JSON.parse(line);
+          if (parsed.tool_calls && Array.isArray(parsed.tool_calls)) {
+            for (const call of parsed.tool_calls) {
+              if (call.args && call.args.Cwd) {
+                let cwd = call.args.Cwd;
+                if (typeof cwd === 'string') {
+                  cwd = cwd.replace(/^"+|"+$/g, '');
+                  const fullPath = cwd.replace(/\\\\/g, '/').replace(/\\/g, '/');
+                  return {
+                    path: fullPath,
+                    name: path.basename(fullPath)
+                  };
+                }
+              }
+            }
+          }
+        } catch (e) {
+          // Skip malformed lines
+        }
       }
       return null;
     },
@@ -445,11 +485,21 @@ app.get('/api/changes', (req, res) => {
     const artifacts = db.prepare('SELECT * FROM artifacts').all();
     const config = initializeWorkspaceIdentity();
     
-    // Map artifact relative path to full URL
-    const mappedArtifacts = artifacts.map(art => ({
-      ...art,
-      url: `http://localhost:${PORT}/${art.path}`
-    }));
+    // Map artifact relative path to full URL and read file content
+    const mappedArtifacts = artifacts.map(art => {
+      let content = '';
+      try {
+        const fullPath = path.join(WORKSPACE_DIR, art.path);
+        content = fs.readFileSync(fullPath, 'utf8');
+      } catch (e) {
+        console.error(`Failed to read artifact content at ${art.path}:`, e);
+      }
+      return {
+        ...art,
+        content: content,
+        url: `http://localhost:${PORT}/${art.path}`
+      };
+    });
 
     res.json({
       success: true,
@@ -495,7 +545,7 @@ app.post('/api/inbox/refresh', (req, res) => {
 
 // API Endpoint: Accept pending change
 app.post('/api/inbox/accept', (req, res) => {
-  const { id, title, featureName } = req.body;
+  const { id, title, featureName, lowestY, x, y } = req.body;
   const item = inbox.find(x => x.id === id);
 
   if (!item) {
@@ -530,6 +580,10 @@ app.post('/api/inbox/accept', (req, res) => {
       copiedFiles.push({ type: 'walkthrough', file: 'walkthrough.md' });
     }
 
+    // Determine safe layout coordinates
+    const changeX = x !== undefined ? Number(x) : 100;
+    const changeY = y !== undefined ? Number(y) : (lowestY !== undefined ? Math.max(100, Number(lowestY) + 100) : 100);
+
     // Write change.json metadata
     const metadata = {
       id: changeId,
@@ -537,13 +591,18 @@ app.post('/api/inbox/accept', (req, res) => {
       feature_id: featureId,
       feature_name: featureName || null,
       status: 'completed',
-      x: 100 + Math.random() * 200,
-      y: 100 + Math.random() * 200,
+      x: changeX,
+      y: changeY,
       created_at: new Date(item.createdAt).toISOString(),
       updated_at: new Date(item.updatedAt).toISOString(),
       project_name: item.projectName,
       project_path: item.projectPath,
-      source_agent: item.sourceAgent
+      source_agent: item.sourceAgent,
+      layout: {
+        plan: { x: changeX, y: changeY + 300 },
+        tasks: { x: changeX + 800, y: changeY + 300 },
+        walkthrough: { x: changeX + 1500, y: changeY + 300 }
+      }
     };
     fs.writeFileSync(path.join(changeFolder, 'change.json'), JSON.stringify(metadata, null, 2));
 
@@ -584,6 +643,108 @@ app.post('/api/changes/layout', (req, res) => {
     }
 
     res.json({ success: true });
+  } catch (e) {
+    res.status(500).json({ success: false, error: e.message });
+  }
+});
+
+// API Endpoint: Save dragged canvas layout coordinates for artifacts
+app.post('/api/artifacts/layout', (req, res) => {
+  const { id, changeId, type, x, y } = req.body;
+  try {
+    // Update SQLite index
+    db.prepare('UPDATE artifacts SET x = ?, y = ? WHERE id = ?').run(x, y, id);
+
+    // Update the change.json file in `.atlas/changes/`
+    const changeFolder = path.join(CHANGES_DIR, changeId);
+    const metaFile = path.join(changeFolder, 'change.json');
+    if (fs.existsSync(metaFile)) {
+      const metadata = JSON.parse(fs.readFileSync(metaFile, 'utf8'));
+      if (!metadata.layout) {
+        metadata.layout = {};
+      }
+      metadata.layout[type] = { x, y };
+      fs.writeFileSync(metaFile, JSON.stringify(metadata, null, 2));
+    }
+
+    res.json({ success: true });
+  } catch (e) {
+    res.status(500).json({ success: false, error: e.message });
+  }
+});
+
+// API Endpoint: Save edited content back to artifact markdown file on disk
+app.post('/api/artifacts/content', (req, res) => {
+  const { path: relativePath, content } = req.body;
+  try {
+    const fullPath = path.join(WORKSPACE_DIR, relativePath);
+    fs.writeFileSync(fullPath, content, 'utf-8');
+    res.json({ success: true });
+  } catch (e) {
+    res.status(500).json({ success: false, error: e.message });
+  }
+});
+
+// API Endpoint: Delete a single accepted change workflow from disk
+app.post('/api/changes/delete', (req, res) => {
+  const { id } = req.body;
+  try {
+    const changeFolder = path.join(CHANGES_DIR, id);
+    if (fs.existsSync(changeFolder)) {
+      fs.rmSync(changeFolder, { recursive: true, force: true });
+    }
+    rebuildIndex();
+    res.json({ success: true });
+  } catch (e) {
+    res.status(500).json({ success: false, error: e.message });
+  }
+});
+
+// API Endpoint: Clear all accepted change workflows from disk
+app.post('/api/changes/clear', (req, res) => {
+  try {
+    if (fs.existsSync(CHANGES_DIR)) {
+      const folders = fs.readdirSync(CHANGES_DIR);
+      for (const folder of folders) {
+        const folderPath = path.join(CHANGES_DIR, folder);
+        if (fs.statSync(folderPath).isDirectory()) {
+          fs.rmSync(folderPath, { recursive: true, force: true });
+        }
+      }
+    }
+    rebuildIndex();
+    res.json({ success: true });
+  } catch (e) {
+    res.status(500).json({ success: false, error: e.message });
+  }
+});
+
+// API Endpoint: Share current canvas
+app.post('/api/share', (req, res) => {
+  try {
+    const { state } = req.body;
+    if (!state) {
+      return res.status(400).json({ success: false, error: 'Missing canvas state' });
+    }
+
+    const shareId = crypto.randomBytes(6).toString('hex');
+    db.prepare('INSERT INTO shared_canvases (id, state_json) VALUES (?, ?)').run(shareId, JSON.stringify(state));
+
+    res.json({ success: true, shareId });
+  } catch (e) {
+    res.status(500).json({ success: false, error: e.message });
+  }
+});
+
+// API Endpoint: Get shared canvas state by ID
+app.get('/api/share/:id', (req, res) => {
+  const { id } = req.params;
+  try {
+    const row = db.prepare('SELECT state_json FROM shared_canvases WHERE id = ?').get(id);
+    if (!row) {
+      return res.status(404).json({ success: false, error: 'Shared canvas not found' });
+    }
+    res.json({ success: true, state: JSON.parse(row.state_json) });
   } catch (e) {
     res.status(500).json({ success: false, error: e.message });
   }

@@ -120,6 +120,7 @@ function loadState() {
       if (!state.windows) state.windows = [];
       if (!state.theme) state.theme = 'dark';
       if (!state.activeTool) state.activeTool = 'select';
+      if (!state.deletedChangeIds) state.deletedChangeIds = [];
       
       // Determine max Z Index of loaded windows
       state.windows.forEach(w => {
@@ -234,74 +235,729 @@ function createWindowDOM(win) {
   setupWindowEventListeners(winEl, win);
 }
 
-function createChangeNodeDOM(change, changeArtifacts) {
-  change.id = String(change.id);
-  const winEl = document.createElement('div');
-  winEl.className = 'window-container change-node';
-  winEl.id = change.id;
-  winEl.style.left = `${change.x}px`;
-  winEl.style.top = `${change.y}px`;
-  winEl.style.width = `340px`;
-  winEl.style.height = `auto`;
-  winEl.style.zIndex = change.zIndex || 10;
+// ============================================================
+// Feature Node System
+// ============================================================
 
-  // Find feature name
-  const feature = state.features.find(f => f.id === change.feature_id);
-  const featureBadge = feature ? `<span class="change-feature-badge">${escapeHtml(feature.name)}</span>` : '';
+// Track which Feature is currently expanded (only one at a time)
+let expandedChangeId = null;
 
-  // Find project details
-  const project = state.projects ? state.projects.find(p => p.id === change.project_id) : null;
-  const projectBadge = project ? `<span class="badge-project" title="Path: ${escapeHtml(project.path)}">[${escapeHtml(project.name)}]</span>` : '';
+// Default sizes for artifact child windows (larger than normal notes)
+const ARTIFACT_DEFAULTS = {
+  plan: { width: 750, height: 500 },
+  tasks: { width: 650, height: 450 },
+  walkthrough: { width: 750, height: 500 }
+};
 
-  let artifactsHtml = '';
-  changeArtifacts.forEach(art => {
-    let typeLabel = art.type.toUpperCase();
-    artifactsHtml += `
-      <div class="artifact-link" data-path="${art.path}" data-type="${art.type}">
-        <span class="artifact-link-icon">${ICONS.file}</span>
-        <span style="font-weight: 500;">${typeLabel}</span>
-      </div>
-    `;
-  });
+// ---- Feature Node DOM ----
 
-  winEl.innerHTML = `
-    <div class="window-header" data-id="${change.id}">
-      <div class="window-title-area">
-        ${featureBadge}
+function createFeatureNodeDOM(change, artifacts) {
+  const existingEl = document.getElementById(`feature_${change.id}`);
+  if (existingEl) return; // Already rendered
+
+  const nodeEl = document.createElement('div');
+  nodeEl.className = 'feature-node';
+  nodeEl.id = `feature_${change.id}`;
+
+  const x = change.x !== null && change.x !== undefined ? Number(change.x) : 100;
+  const y = change.y !== null && change.y !== undefined ? Number(change.y) : 100;
+
+  nodeEl.style.left = `${x}px`;
+  nodeEl.style.top = `${y}px`;
+  nodeEl.style.zIndex = 10;
+
+  if (expandedChangeId === change.id) {
+    nodeEl.classList.add('expanded');
+  }
+
+  const projectName = change.project_name || change.projectName || '';
+  const projectPath = change.project_path || change.projectPath || '';
+  const projectBadge = projectName ? `<span class="feature-node-project-badge" title="${escapeHtml(projectPath)}">${escapeHtml(projectName)}</span>` : '';
+
+  const hasPlan = artifacts.some(a => a.type === 'plan');
+  const hasTasks = artifacts.some(a => a.type === 'tasks');
+  const hasWalkthrough = artifacts.some(a => a.type === 'walkthrough');
+
+  const isExpanded = expandedChangeId === change.id;
+
+  nodeEl.innerHTML = `
+    <div class="feature-node-header" data-change-id="${change.id}">
+      <div class="feature-node-title">
         ${projectBadge}
-        <span style="font-weight: 600; font-size: 13px; color: var(--text-primary); text-overflow: ellipsis; overflow: hidden; white-space: nowrap;">${escapeHtml(change.title)}</span>
+        <span class="feature-node-title-text" title="${escapeHtml(change.title)}">${escapeHtml(change.title)}</span>
+      </div>
+      <div class="feature-node-controls">
+        <button class="window-btn info-btn tooltip" data-tooltip="View Metadata">ℹ️</button>
+        <button class="window-btn collapse-btn tooltip" data-tooltip="Collapse/Expand">
+          ${ICONS.collapse}
+        </button>
+        <button class="window-btn delete-btn tooltip" data-tooltip="Delete Workflow">
+          ${ICONS.close}
+        </button>
       </div>
     </div>
-    <div class="window-body" style="padding: 16px;">
-      ${artifactsHtml || '<div style="color:var(--text-muted); font-size: 12px; text-align: center;">No artifacts attached</div>'}
+    <div class="feature-node-body">
+      <div class="feature-node-row" data-type="plan" data-change-id="${change.id}">
+        <span class="row-dot ${hasPlan ? 'dot-plan' : 'dot-missing'}"></span>
+        <span class="row-label ${hasPlan ? '' : 'missing'}">${hasPlan ? 'Plan' : 'Plan (not available)'}</span>
+        <span class="row-toggle ${isExpanded && hasPlan ? 'open' : ''}"></span>
+      </div>
+      <div class="feature-node-row" data-type="tasks" data-change-id="${change.id}">
+        <span class="row-dot ${hasTasks ? 'dot-tasks' : 'dot-missing'}"></span>
+        <span class="row-label ${hasTasks ? '' : 'missing'}">${hasTasks ? 'Tasks' : 'Tasks (not available)'}</span>
+        <span class="row-toggle ${isExpanded && hasTasks ? 'open' : ''}"></span>
+      </div>
+      <div class="feature-node-row" data-type="walkthrough" data-change-id="${change.id}">
+        <span class="row-dot ${hasWalkthrough ? 'dot-walkthrough' : 'dot-missing'}"></span>
+        <span class="row-label ${hasWalkthrough ? '' : 'missing'}">${hasWalkthrough ? 'Walkthrough' : 'Walkthrough (not available)'}</span>
+        <span class="row-toggle ${isExpanded && hasWalkthrough ? 'open' : ''}"></span>
+      </div>
+    </div>
+
+    <div class="card-metadata-overlay" style="display: none;">
+      <div class="metadata-header">
+        <strong>Feature Details</strong>
+        <button class="metadata-close-btn">✕</button>
+      </div>
+      <div class="metadata-content">
+        <div class="metadata-row">
+          <span class="metadata-label">Project</span>
+          <span class="metadata-val">${escapeHtml(projectName || 'Default')}</span>
+        </div>
+        <div class="metadata-row">
+          <span class="metadata-label">Source Agent</span>
+          <span class="metadata-val">${escapeHtml(change.source_agent || 'Antigravity')}</span>
+        </div>
+        <div class="metadata-row">
+          <span class="metadata-label">Created At</span>
+          <span class="metadata-val">${escapeHtml(new Date(change.created_at).toLocaleString())}</span>
+        </div>
+        <div class="metadata-row">
+          <span class="metadata-label">Updated At</span>
+          <span class="metadata-val">${escapeHtml(change.updated_at ? new Date(change.updated_at).toLocaleString() : 'N/A')}</span>
+        </div>
+        <div class="metadata-row">
+          <span class="metadata-label">Project Path</span>
+          <span class="metadata-val font-mono" style="font-size: 10px;">${escapeHtml(projectPath)}</span>
+        </div>
+      </div>
     </div>
   `;
 
+  canvasWorkspace.appendChild(nodeEl);
+  setupFeatureNodeEventListeners(nodeEl, change, artifacts);
+}
+
+function setupFeatureNodeEventListeners(nodeEl, change, artifacts) {
+  const header = nodeEl.querySelector('.feature-node-header');
+  const infoBtn = nodeEl.querySelector('.info-btn');
+  const metadataOverlay = nodeEl.querySelector('.card-metadata-overlay');
+  const metadataCloseBtn = nodeEl.querySelector('.metadata-close-btn');
+  const collapseBtn = nodeEl.querySelector('.collapse-btn');
+  const deleteBtn = nodeEl.querySelector('.delete-btn');
+
+  // Info button
+  if (infoBtn && metadataOverlay) {
+    infoBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const isVisible = metadataOverlay.style.display === 'block';
+      metadataOverlay.style.display = isVisible ? 'none' : 'block';
+    });
+  }
+  if (metadataCloseBtn && metadataOverlay) {
+    metadataCloseBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      metadataOverlay.style.display = 'none';
+    });
+  }
+
+  // Collapse button — hide/show body
+  collapseBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    nodeEl.classList.toggle('collapsed');
+    drawConnections();
+  });
+
+  // Delete button — remove feature node from canvas (visual only, no disk deletion)
+  deleteBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    if (confirm(`Remove the change workflow "${change.title}" from the canvas?`)) {
+      if (expandedChangeId === change.id) {
+        collapseFeature(change.id);
+      }
+      if (!state.deletedChangeIds) {
+        state.deletedChangeIds = [];
+      }
+      if (!state.deletedChangeIds.includes(change.id)) {
+        state.deletedChangeIds.push(change.id);
+      }
+      
+      const el = document.getElementById(`feature_${change.id}`);
+      if (el) el.remove();
+      
+      saveState();
+      syncWithServer();
+    }
+  });
+
+  // Row clicks — expand Feature and open artifacts
+  nodeEl.querySelectorAll('.feature-node-row').forEach(row => {
+    row.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const type = row.getAttribute('data-type');
+      const art = artifacts.find(a => a.type === type);
+      if (!art) return; // Artifact doesn't exist
+
+      expandFeature(change.id);
+    });
+  });
+
+  // Focus on click
+  nodeEl.addEventListener('mousedown', (e) => {
+    maxZIndex++;
+    nodeEl.style.zIndex = maxZIndex;
+
+    // Focus styling
+    document.querySelectorAll('.feature-node').forEach(el => el.classList.remove('focused'));
+    document.querySelectorAll('.window-container').forEach(el => el.classList.remove('focused'));
+    nodeEl.classList.add('focused');
+
+    // Selection
+    if (!e.target.closest('.feature-node-controls') && !e.target.closest('.card-metadata-overlay') && !e.target.closest('.feature-node-row')) {
+      if (!nodeEl.classList.contains('selected')) {
+        if (!e.shiftKey) {
+          document.querySelectorAll('.feature-node.selected, .window-container.selected').forEach(el => el.classList.remove('selected'));
+        }
+        nodeEl.classList.add('selected');
+      }
+    }
+  });
+
+  // Header drag
+  header.addEventListener('mousedown', (e) => {
+    if (e.target.closest('.feature-node-controls') || e.target.closest('.card-metadata-overlay')) {
+      return;
+    }
+    e.preventDefault();
+    e.stopPropagation();
+
+    maxZIndex++;
+    nodeEl.style.zIndex = maxZIndex;
+
+    document.querySelectorAll('.feature-node').forEach(el => el.classList.remove('focused'));
+    document.querySelectorAll('.window-container').forEach(el => el.classList.remove('focused'));
+    nodeEl.classList.add('focused');
+
+    if (!nodeEl.classList.contains('selected')) {
+      if (!e.shiftKey) {
+        document.querySelectorAll('.feature-node.selected, .window-container.selected').forEach(el => el.classList.remove('selected'));
+      }
+      nodeEl.classList.add('selected');
+    }
+
+    // Build drag group
+    const selectedWins = [];
+    document.querySelectorAll('.feature-node.selected, .window-container.selected').forEach(el => {
+      const wId = el.id;
+      if (el.classList.contains('feature-node')) {
+        const cId = wId.replace('feature_', '');
+        const changeObj = state.changes.find(c => c.id === cId);
+        if (changeObj) {
+          selectedWins.push({
+            window: changeObj,
+            startWinX: Number(changeObj.x) || 0,
+            startWinY: Number(changeObj.y) || 0,
+            isFeatureNode: true,
+            elementId: wId
+          });
+        }
+      } else {
+        const standardWin = state.windows.find(w => w.id === wId);
+        const artifactWin = state.artifacts.find(a => a.id === wId);
+        const targetWin = standardWin || artifactWin;
+        if (targetWin) {
+          selectedWins.push({
+            window: targetWin,
+            startWinX: targetWin.x,
+            startWinY: targetWin.y,
+            isArtifact: !!artifactWin,
+            isFeatureNode: false
+          });
+        }
+      }
+    });
+
+    activeDrag = {
+      startX: e.clientX,
+      startY: e.clientY,
+      selectedWins: selectedWins
+    };
+  });
+}
+
+// ---- Expand / Collapse Feature ----
+
+function expandFeature(changeId) {
+  // If already expanded, do nothing
+  if (expandedChangeId === changeId) return;
+
+  // Collapse previous Feature
+  if (expandedChangeId) {
+    collapseFeature(expandedChangeId);
+  }
+
+  expandedChangeId = changeId;
+
+  // Update Feature Node visual state
+  document.querySelectorAll('.feature-node').forEach(el => el.classList.remove('expanded'));
+  const featureEl = document.getElementById(`feature_${changeId}`);
+  if (featureEl) {
+    featureEl.classList.add('expanded');
+    // Update toggle circles
+    featureEl.querySelectorAll('.row-toggle').forEach(toggle => {
+      const row = toggle.closest('.feature-node-row');
+      const type = row.getAttribute('data-type');
+      const art = state.artifacts.find(a => a.change_id === changeId && a.type === type);
+      if (art) {
+        toggle.classList.add('open');
+        row.classList.add('active');
+      }
+    });
+  }
+
+  // Get change and its artifacts
+  const change = state.changes.find(c => c.id === changeId);
+  if (!change) return;
+  const artifacts = state.artifacts.filter(a => a.change_id === changeId);
+  if (artifacts.length === 0) return;
+
+  // Calculate smart spawn layout (Component 6)
+  const featureX = Number(change.x) || 100;
+  const featureY = Number(change.y) || 100;
+  const featureW = 280; // Feature Node width
+  const featureH = featureEl ? featureEl.offsetHeight : 180;
+
+  const childY = featureY + featureH + 120;
+
+  // Calculate total width for center-alignment
+  const childWidths = artifacts.map(a => ARTIFACT_DEFAULTS[a.type]?.width || 650);
+  const totalChildrenWidth = childWidths.reduce((sum, w) => sum + w, 0) + (artifacts.length - 1) * 50;
+  let startX = featureX + (featureW / 2) - (totalChildrenWidth / 2);
+
+  // Create artifact windows with smart positions
+  let xOffset = 0;
+  artifacts.forEach((art, idx) => {
+    const defaults = ARTIFACT_DEFAULTS[art.type] || { width: 650, height: 450 };
+
+    // Use saved position if available and previously placed, otherwise use calculated layout
+    const hasCustomPosition = art.x !== null && art.x !== undefined && art.y !== null && art.y !== undefined;
+    // Only use saved position if we've expanded before (positions will differ from server defaults)
+    const savedX = hasCustomPosition ? Number(art.x) : (startX + xOffset);
+    const savedY = hasCustomPosition ? Number(art.y) : childY;
+
+    // Temporarily override art position for DOM creation
+    const origX = art.x;
+    const origY = art.y;
+    art.x = savedX;
+    art.y = savedY;
+
+    createArtifactCardDOM(art, change, defaults);
+
+    art.x = origX;
+    art.y = origY;
+
+    xOffset += defaults.width + 50;
+  });
+
+  drawConnections();
+}
+
+function collapseFeature(changeId) {
+  // Remove child artifact windows from DOM
+  const artifacts = state.artifacts.filter(a => a.change_id === changeId);
+  artifacts.forEach(art => {
+    const el = document.getElementById(art.id);
+    if (el) {
+      // Save current position before removing
+      const currentX = parseFloat(el.style.left) || 0;
+      const currentY = parseFloat(el.style.top) || 0;
+      // Persist position for next expand
+      fetch('http://localhost:3000/api/artifacts/layout', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id: art.id, changeId: changeId, type: art.type, x: currentX, y: currentY })
+      }).catch(err => console.error("Failed to save artifact layout:", err));
+
+      el.remove();
+    }
+  });
+
+  // Update Feature Node visual state
+  const featureEl = document.getElementById(`feature_${changeId}`);
+  if (featureEl) {
+    featureEl.classList.remove('expanded');
+    featureEl.querySelectorAll('.row-toggle').forEach(t => t.classList.remove('open'));
+    featureEl.querySelectorAll('.feature-node-row').forEach(r => r.classList.remove('active'));
+  }
+
+  if (expandedChangeId === changeId) {
+    expandedChangeId = null;
+  }
+
+  drawConnections();
+}
+
+function resolveChildCollisions(draggedWinId) {
+  if (!expandedChangeId) return;
+
+  const artifacts = state.artifacts.filter(a => a.change_id === expandedChangeId);
+  const boxes = [];
+
+  artifacts.forEach(art => {
+    const el = document.getElementById(art.id);
+    if (el) {
+      boxes.push({
+        id: art.id,
+        artifact: art,
+        el: el,
+        x: parseFloat(el.style.left) || art.x || 0,
+        y: parseFloat(el.style.top) || art.y || 0,
+        w: el.offsetWidth || 650,
+        h: el.offsetHeight || 450,
+        isDragged: art.id === draggedWinId,
+        pushed: art.id === draggedWinId
+      });
+    }
+  });
+
+  if (boxes.length <= 1) return;
+
+  const spacing = 20;
+  let maxIterations = 10;
+  let hasOverlap = true;
+
+  while (hasOverlap && maxIterations > 0) {
+    hasOverlap = false;
+    maxIterations--;
+
+    for (let i = 0; i < boxes.length; i++) {
+      for (let j = 0; j < boxes.length; j++) {
+        if (i === j) continue;
+
+        const b1 = boxes[i];
+        const b2 = boxes[j];
+
+        const overlapsX = (b1.x < b2.x + b2.w + spacing) && (b1.x + b1.w + spacing > b2.x);
+        const overlapsY = (b1.y < b2.y + b2.h + spacing) && (b1.y + b1.h + spacing > b2.y);
+
+        if (overlapsX && overlapsY) {
+          hasOverlap = true;
+
+          let source = b1;
+          let target = b2;
+
+          if (b2.isDragged || (b2.pushed && !b1.pushed)) {
+            source = b2;
+            target = b1;
+          }
+
+          let overlapX = 0;
+          if (source.x < target.x) {
+            overlapX = (source.x + source.w + spacing) - target.x;
+          } else {
+            overlapX = source.x - (target.x + target.w + spacing);
+          }
+
+          let overlapY = 0;
+          if (source.y < target.y) {
+            overlapY = (source.y + source.h + spacing) - target.y;
+          } else {
+            overlapY = source.y - (target.y + target.h + spacing);
+          }
+
+          if (Math.abs(overlapX) < Math.abs(overlapY)) {
+            target.x += overlapX;
+          } else {
+            target.y += overlapY;
+          }
+
+          target.pushed = true;
+        }
+      }
+    }
+  }
+
+  boxes.forEach(b => {
+    if (b.id !== draggedWinId) {
+      b.el.style.left = `${Math.round(b.x)}px`;
+      b.el.style.top = `${Math.round(b.y)}px`;
+      b.artifact.x = Math.round(b.x);
+      b.artifact.y = Math.round(b.y);
+    }
+  });
+}
+
+// ---- Artifact Card DOM (Children of Feature Nodes) ----
+
+function createArtifactCardDOM(art, change, defaults) {
+  const winEl = document.createElement('div');
+
+  if (!state.artifactUIState) {
+    state.artifactUIState = {};
+  }
+  const defaultSize = defaults || ARTIFACT_DEFAULTS[art.type] || { width: 650, height: 450 };
+  const uiState = state.artifactUIState[art.id] || {
+    width: defaultSize.width,
+    height: defaultSize.height,
+    isCollapsed: false,
+    editMode: false,
+    zIndex: 10
+  };
+  state.artifactUIState[art.id] = uiState;
+
+  winEl.className = `window-container change-card artifact-${art.type}`;
+  winEl.id = art.id;
+
+  const x = art.x !== null && art.x !== undefined ? Number(art.x) : 100;
+  const y = art.y !== null && art.y !== undefined ? Number(art.y) : 100;
+
+  winEl.style.left = `${x}px`;
+  winEl.style.top = `${y}px`;
+  winEl.style.width = `${uiState.width}px`;
+  winEl.style.height = `${uiState.height}px`;
+  winEl.style.zIndex = uiState.zIndex;
+
+  if (uiState.isCollapsed) {
+    winEl.classList.add('collapsed');
+  }
+
+  let typeLabel = 'Plan';
+  if (art.type === 'tasks') typeLabel = 'Tasks';
+  if (art.type === 'walkthrough') typeLabel = 'Walkthrough';
+
+  winEl.innerHTML = `
+    <div class="window-header" data-id="${art.id}">
+      <div class="window-title-area">
+        <span class="window-title-text">${typeLabel}</span>
+      </div>
+      <div class="window-controls">
+        <button class="window-btn edit-btn tooltip ${uiState.editMode ? 'active' : ''}" data-tooltip="Toggle Editor (📝)">
+          ${uiState.editMode ? ICONS.preview : ICONS.edit}
+        </button>
+        <button class="window-btn collapse-btn tooltip" data-tooltip="Collapse/Expand (➖)">
+          ${uiState.isCollapsed ? ICONS.expand : ICONS.collapse}
+        </button>
+        <button class="window-btn focus-btn tooltip" data-tooltip="Focus Document (🎯)">
+          ${ICONS.focus}
+        </button>
+        <button class="window-btn close-artifact-btn tooltip" data-tooltip="Close (✕)">
+          ${ICONS.close}
+        </button>
+      </div>
+    </div>
+    <div class="window-body">
+      <div class="window-editor" style="display: ${uiState.editMode ? 'block' : 'none'};">
+        <textarea placeholder="Write your markdown here...">${escapeHtml(art.content || '')}</textarea>
+      </div>
+      <div class="markdown-preview" style="display: ${uiState.editMode ? 'none' : 'block'};"></div>
+    </div>
+
+    <div class="card-metadata-overlay" style="display: none;">
+      <div class="metadata-header">
+        <strong>Artifact Details</strong>
+        <button class="metadata-close-btn">✕</button>
+      </div>
+      <div class="metadata-content">
+        <div class="metadata-row">
+          <span class="metadata-label">Type</span>
+          <span class="metadata-val">${typeLabel}</span>
+        </div>
+        <div class="metadata-row">
+          <span class="metadata-label">Project</span>
+          <span class="metadata-val">${escapeHtml(change.project_name || change.projectName || 'Default')}</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Custom Resize Handles -->
+    <div class="resize-handle handle-r" data-type="r"></div>
+    <div class="resize-handle handle-b" data-type="b"></div>
+    <div class="resize-handle handle-se" data-type="se"></div>
+  `;
+
   canvasWorkspace.appendChild(winEl);
+  renderArtifactMarkdown(art, winEl);
+  setupArtifactCardEventListeners(winEl, art, change);
+}
 
-  // Focus on mouse down
+function renderArtifactMarkdown(art, winEl) {
+  if (!winEl) return;
+  const previewEl = winEl.querySelector('.markdown-preview');
+
+  try {
+    if (window.marked && typeof window.marked.parse === 'function') {
+      previewEl.innerHTML = window.marked.parse(art.content || '');
+    } else {
+      previewEl.innerHTML = `<p>${(art.content || '').replace(/\n/g, '<br>')}</p>`;
+    }
+  } catch (err) {
+    console.error("Marked parsing error:", err);
+    previewEl.innerHTML = `<pre>${escapeHtml(art.content || '')}</pre>`;
+  }
+
+  const listItems = previewEl.querySelectorAll('li');
+  listItems.forEach(li => {
+    const text = li.innerHTML.trim();
+    if (text.startsWith('[ ]')) {
+      li.innerHTML = `<input type="checkbox" disabled> ${text.substring(3)}`;
+    } else if (text.startsWith('[x]') || text.startsWith('[X]')) {
+      li.innerHTML = `<input type="checkbox" checked disabled> ${text.substring(3)}`;
+    }
+  });
+
+  if (window.mermaid) {
+    const mermaidCodes = previewEl.querySelectorAll('pre code.language-mermaid');
+    mermaidCodes.forEach((codeEl, idx) => {
+      const preEl = codeEl.parentElement;
+      const rawCode = codeEl.textContent;
+      
+      const mermaidDiv = document.createElement('div');
+      mermaidDiv.className = 'mermaid';
+      mermaidDiv.id = `mermaid-${art.id}-${idx}`;
+      mermaidDiv.textContent = rawCode;
+      
+      preEl.replaceWith(mermaidDiv);
+    });
+    
+    try {
+      window.mermaid.init(undefined, previewEl.querySelectorAll('.mermaid'));
+    } catch (e) {
+      console.error("Mermaid rendering failed:", e);
+    }
+  }
+
+  if (window.Prism) {
+    window.Prism.highlightAllUnder(previewEl);
+  }
+
+  updateArtifactWindowScale(art, winEl);
+}
+
+function updateArtifactWindowScale(art, winEl) {
+  if (!winEl) return;
+  const previewEl = winEl.querySelector('.markdown-preview');
+  const bodyEl = winEl.querySelector('.window-body');
+  if (!previewEl || !bodyEl) return;
+
+  const uiState = state.artifactUIState[art.id] || {};
+
+  if (uiState.editMode) {
+    previewEl.style.transform = '';
+    previewEl.style.zoom = '';
+    previewEl.style.width = '';
+    previewEl.style.height = '';
+    previewEl.style.position = '';
+    bodyEl.style.overflow = 'auto';
+    return;
+  }
+
+  bodyEl.style.overflow = 'hidden';
+
+  const width = uiState.width || 650;
+
+  if (!uiState.baseWidth || !uiState.baseHeight) {
+    previewEl.style.transform = '';
+    previewEl.style.zoom = '';
+    previewEl.style.position = '';
+    previewEl.style.width = `${width}px`;
+
+    const naturalHeight = previewEl.scrollHeight;
+    uiState.baseWidth = width;
+    uiState.baseHeight = Math.max(100, naturalHeight);
+
+    if (uiState.openComplete) {
+      uiState.height = uiState.baseHeight + 42;
+      winEl.style.height = `${uiState.height}px`;
+      delete uiState.openComplete;
+      saveState();
+    }
+  }
+
+  const scale = width / uiState.baseWidth;
+  previewEl.style.transform = '';
+  previewEl.style.position = 'relative';
+  previewEl.style.width = `${uiState.baseWidth}px`;
+  previewEl.style.height = `${uiState.baseHeight}px`;
+  previewEl.style.zoom = scale;
+}
+
+function setupArtifactCardEventListeners(winEl, art, change) {
+  const header = winEl.querySelector('.window-header');
+  const textarea = winEl.querySelector('.window-editor textarea');
+  const uiState = state.artifactUIState[art.id];
+  const infoBtn = winEl.querySelector('.info-btn'); // Note: Artifact cards use a different metadata structure
+  const metadataOverlay = winEl.querySelector('.card-metadata-overlay');
+  const metadataCloseBtn = winEl.querySelector('.metadata-close-btn');
+
+  if (metadataCloseBtn && metadataOverlay) {
+    metadataCloseBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      metadataOverlay.style.display = 'none';
+    });
+  }
+
+  // Close artifact button (doesn't delete, just collapses the Feature)
+  const closeBtn = winEl.querySelector('.close-artifact-btn');
+  if (closeBtn) {
+    closeBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      collapseFeature(change.id);
+    });
+  }
+
   winEl.addEventListener('mousedown', (e) => {
-    focusWindow(change.id);
+    maxZIndex++;
+    uiState.zIndex = maxZIndex;
+    winEl.style.zIndex = maxZIndex;
+    saveState();
 
-    // Group dragging check for change nodes
-    if (winEl.classList.contains('selected')) {
-      const isInteractive = e.target.closest('button, a, input, textarea, .resize-handle, .window-header, .artifact-link');
+    document.querySelectorAll('.window-container').forEach(el => el.classList.remove('focused'));
+    document.querySelectorAll('.feature-node').forEach(el => el.classList.remove('focused'));
+    winEl.classList.add('focused');
+
+    if (!uiState.editMode && winEl.classList.contains('selected')) {
+      const isInteractive = e.target.closest('button, a, input, textarea, .resize-handle, .window-header, .card-metadata-overlay');
       if (!isInteractive) {
         e.preventDefault();
-        
+
         const selectedWins = [];
-        document.querySelectorAll('.window-container.selected').forEach(el => {
+        document.querySelectorAll('.window-container.selected, .feature-node.selected').forEach(el => {
           const wId = el.id;
-          const standardWin = state.windows.find(w => w.id === wId);
-          const changeWin = state.changes.find(c => c.id === wId);
-          const targetWin = standardWin || changeWin;
-          if (targetWin) {
-            selectedWins.push({
-              window: targetWin,
-              startWinX: targetWin.x,
-              startWinY: targetWin.y,
-              isChangeNode: !!changeWin
-            });
+          if (el.classList.contains('feature-node')) {
+            const cId = wId.replace('feature_', '');
+            const changeObj = state.changes.find(c => c.id === cId);
+            if (changeObj) {
+              selectedWins.push({
+                window: changeObj,
+                startWinX: Number(changeObj.x) || 0,
+                startWinY: Number(changeObj.y) || 0,
+                isFeatureNode: true,
+                elementId: wId
+              });
+            }
+          } else {
+            const standardWin = state.windows.find(w => w.id === wId);
+            const artifactWin = state.artifacts.find(a => a.id === wId);
+            const targetWin = standardWin || artifactWin;
+            if (targetWin) {
+              selectedWins.push({
+                window: targetWin,
+                startWinX: targetWin.x,
+                startWinY: targetWin.y,
+                isArtifact: !!artifactWin,
+                isFeatureNode: false
+              });
+            }
           }
         });
 
@@ -314,33 +970,138 @@ function createChangeNodeDOM(change, changeArtifacts) {
     }
   });
 
-  // Drag handler start
-  const header = winEl.querySelector('.window-header');
+  let debounceTimer;
+  textarea.addEventListener('input', (e) => {
+    art.content = e.target.value;
+
+    clearTimeout(debounceTimer);
+    debounceTimer = setTimeout(() => {
+      renderArtifactMarkdown(art, winEl);
+
+      fetch('http://localhost:3000/api/artifacts/content', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          path: art.path,
+          content: art.content
+        })
+      }).catch(err => console.error("Failed to save artifact content to disk:", err));
+    }, 400);
+  });
+
+  winEl.querySelector('.edit-btn').addEventListener('click', (e) => {
+    e.stopPropagation();
+    uiState.editMode = !uiState.editMode;
+
+    const editor = winEl.querySelector('.window-editor');
+    const preview = winEl.querySelector('.markdown-preview');
+    const editBtn = e.currentTarget;
+
+    if (uiState.editMode) {
+      editor.style.display = 'block';
+      preview.style.display = 'none';
+      editBtn.innerHTML = ICONS.preview;
+      editBtn.setAttribute('data-tooltip', 'Toggle Preview (📝)');
+      textarea.focus();
+    } else {
+      editor.style.display = 'none';
+      preview.style.display = 'block';
+      editBtn.innerHTML = ICONS.edit;
+      editBtn.setAttribute('data-tooltip', 'Toggle Editor (📝)');
+      uiState.baseWidth = null;
+      uiState.baseHeight = null;
+      uiState.openComplete = true;
+      renderArtifactMarkdown(art, winEl);
+    }
+    saveState();
+  });
+
+  winEl.querySelector('.collapse-btn').addEventListener('click', (e) => {
+    e.stopPropagation();
+    uiState.isCollapsed = !uiState.isCollapsed;
+
+    const collapseBtn = e.currentTarget;
+    if (uiState.isCollapsed) {
+      winEl.classList.add('collapsed');
+      collapseBtn.innerHTML = ICONS.expand;
+    } else {
+      winEl.classList.remove('collapsed');
+      collapseBtn.innerHTML = ICONS.collapse;
+    }
+    drawConnections();
+    saveState();
+  });
+
+  winEl.querySelector('.focus-btn').addEventListener('click', (e) => {
+    e.stopPropagation();
+    const viewWidth = canvasContainer.clientWidth;
+    const viewHeight = canvasContainer.clientHeight;
+    state.zoom = Math.max(0.6, Math.min(1.2, state.zoom));
+
+    const artX = parseFloat(winEl.style.left) || 0;
+    const artY = parseFloat(winEl.style.top) || 0;
+    state.pan.x = (viewWidth / 2) - (artX + uiState.width / 2) * state.zoom;
+    state.pan.y = (viewHeight / 2) - (artY + uiState.height / 2) * state.zoom;
+    updateTransform();
+
+    maxZIndex++;
+    uiState.zIndex = maxZIndex;
+    winEl.style.zIndex = maxZIndex;
+    document.querySelectorAll('.window-container').forEach(el => el.classList.remove('focused'));
+    document.querySelectorAll('.feature-node').forEach(el => el.classList.remove('focused'));
+    winEl.classList.add('focused');
+    saveState();
+  });
+
   header.addEventListener('mousedown', (e) => {
+    if (e.target.closest('.window-controls') || e.target.closest('.card-metadata-overlay')) {
+      return;
+    }
     e.preventDefault();
     e.stopPropagation();
-    focusWindow(change.id);
-    
+
+    maxZIndex++;
+    uiState.zIndex = maxZIndex;
+    winEl.style.zIndex = maxZIndex;
+    document.querySelectorAll('.window-container').forEach(el => el.classList.remove('focused'));
+    document.querySelectorAll('.feature-node').forEach(el => el.classList.remove('focused'));
+    winEl.classList.add('focused');
+
     if (!winEl.classList.contains('selected')) {
       if (!e.shiftKey) {
-        document.querySelectorAll('.window-container.selected').forEach(el => el.classList.remove('selected'));
+        document.querySelectorAll('.window-container.selected, .feature-node.selected').forEach(el => el.classList.remove('selected'));
       }
       winEl.classList.add('selected');
     }
 
     const selectedWins = [];
-    document.querySelectorAll('.window-container.selected').forEach(el => {
+    document.querySelectorAll('.window-container.selected, .feature-node.selected').forEach(el => {
       const wId = el.id;
-      const standardWin = state.windows.find(w => w.id === wId);
-      const changeWin = state.changes.find(c => c.id === wId);
-      const targetWin = standardWin || changeWin;
-      if (targetWin) {
-        selectedWins.push({
-          window: targetWin,
-          startWinX: targetWin.x,
-          startWinY: targetWin.y,
-          isChangeNode: !!changeWin
-        });
+      if (el.classList.contains('feature-node')) {
+        const cId = wId.replace('feature_', '');
+        const changeObj = state.changes.find(c => c.id === cId);
+        if (changeObj) {
+          selectedWins.push({
+            window: changeObj,
+            startWinX: Number(changeObj.x) || 0,
+            startWinY: Number(changeObj.y) || 0,
+            isFeatureNode: true,
+            elementId: wId
+          });
+        }
+      } else {
+        const standardWin = state.windows.find(w => w.id === wId);
+        const artifactWin = state.artifacts.find(a => a.id === wId);
+        const targetWin = standardWin || artifactWin;
+        if (targetWin) {
+          selectedWins.push({
+            window: targetWin,
+            startWinX: targetWin.x,
+            startWinY: targetWin.y,
+            isArtifact: !!artifactWin,
+            isFeatureNode: false
+          });
+        }
       }
     });
 
@@ -351,45 +1112,182 @@ function createChangeNodeDOM(change, changeArtifacts) {
     };
   });
 
-  // Setup click listeners for artifacts
-  winEl.querySelectorAll('.artifact-link').forEach(link => {
-    link.addEventListener('click', (e) => {
-      const filePath = link.getAttribute('data-path');
-      const fileType = link.getAttribute('data-type');
-      openArtifactInViewer(filePath, change.title + ' - ' + fileType.toUpperCase());
+  const handles = winEl.querySelectorAll('.resize-handle');
+  handles.forEach(handle => {
+    handle.addEventListener('mousedown', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+
+      maxZIndex++;
+      uiState.zIndex = maxZIndex;
+      winEl.style.zIndex = maxZIndex;
+      document.querySelectorAll('.window-container').forEach(el => el.classList.remove('focused'));
+      document.querySelectorAll('.feature-node').forEach(el => el.classList.remove('focused'));
+      winEl.classList.add('focused');
+
+      activeResize = {
+        window: art,
+        isArtifact: true,
+        handleType: e.target.getAttribute('data-type'),
+        startX: e.clientX,
+        startY: e.clientY,
+        startW: uiState.width,
+        startH: uiState.height,
+        startWinX: parseFloat(winEl.style.left) || art.x,
+        startWinY: parseFloat(winEl.style.top) || art.y
+      };
     });
   });
 }
 
-function openArtifactInViewer(relativePath, name) {
-  fetch(`http://localhost:3000/${relativePath}`)
-    .then(res => res.text())
-    .then(content => {
-      // Check if already open
-      const existing = state.windows.find(w => w.name === name);
-      if (existing) {
-        focusWindow(existing.id);
-        centerOnWindow(existing.id);
-      } else {
-        const id = 'win_' + Date.now();
-        const newWin = {
-          id: id,
-          name: name,
-          content: content,
-          x: 150 + Math.random() * 100,
-          y: 150 + Math.random() * 100,
-          width: 600,
-          height: 450,
-          zIndex: ++maxZIndex,
-          isCollapsed: false,
-          editMode: false,
-          openComplete: true
-        };
-        state.windows.push(newWin);
-        createWindowDOM(newWin);
-        focusWindow(id);
+// ---- Elbow Connectors ----
+
+function drawConnections() {
+  const svg = document.getElementById('canvas-connections');
+  if (!svg) return;
+
+  // Ensure defs with arrow markers exist
+  let defs = svg.querySelector('defs');
+  if (!defs) {
+    defs = document.createElementNS('http://www.w3.org/2000/svg', 'defs');
+    svg.appendChild(defs);
+  }
+
+  // Create color-coded arrow markers
+  const colors = {
+    plan: 'rgba(99, 102, 241, 0.8)',
+    tasks: 'rgba(6, 182, 212, 0.8)',
+    walkthrough: 'rgba(16, 185, 129, 0.8)'
+  };
+
+  Object.entries(colors).forEach(([type, color]) => {
+    let marker = defs.querySelector(`#arrow-${type}`);
+    if (!marker) {
+      marker = document.createElementNS('http://www.w3.org/2000/svg', 'marker');
+      marker.setAttribute('id', `arrow-${type}`);
+      marker.setAttribute('viewBox', '0 0 10 10');
+      marker.setAttribute('refX', '8');
+      marker.setAttribute('refY', '5');
+      marker.setAttribute('markerWidth', '6');
+      marker.setAttribute('markerHeight', '6');
+      marker.setAttribute('orient', 'auto-start-reverse');
+      const arrowPath = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+      arrowPath.setAttribute('d', 'M 0 1.5 L 8 5 L 0 8.5 z');
+      arrowPath.setAttribute('fill', color);
+      marker.appendChild(arrowPath);
+      defs.appendChild(marker);
+    }
+  });
+
+  // Clear existing paths
+  svg.querySelectorAll('path').forEach(p => p.remove());
+
+  // Only draw connections for the expanded Feature
+  if (!expandedChangeId) return;
+
+  const featureEl = document.getElementById(`feature_${expandedChangeId}`);
+  if (!featureEl) return;
+
+  const artifacts = state.artifacts.filter(a => a.change_id === expandedChangeId);
+
+  artifacts.forEach(art => {
+    const childEl = document.getElementById(art.id);
+    if (!childEl) return;
+    drawElbow(featureEl, childEl, art.type);
+  });
+}
+
+function drawElbow(featureEl, childEl, type) {
+  const svg = document.getElementById('canvas-connections');
+  if (!svg) return;
+
+  // Feature Node bottom-center
+  const fX = parseFloat(featureEl.style.left) || 0;
+  const fY = parseFloat(featureEl.style.top) || 0;
+  const fW = featureEl.offsetWidth || 280;
+  const fH = featureEl.offsetHeight || 180;
+
+  const startX = fX + fW / 2;
+  const startY = fY + fH;
+
+  // Child header top-center
+  const cX = parseFloat(childEl.style.left) || 0;
+  const cY = parseFloat(childEl.style.top) || 0;
+  const cW = childEl.offsetWidth || 650;
+
+  const endX = cX + cW / 2;
+  const endY = cY;
+
+  // Elbow routing: vertical down → horizontal → vertical down
+  const midY = startY + (endY - startY) / 2;
+
+  // Build orthogonal path
+  const d = `M ${startX} ${startY} L ${startX} ${midY} L ${endX} ${midY} L ${endX} ${endY}`;
+
+  const strokeColors = {
+    plan: 'rgba(99, 102, 241, 0.6)',
+    tasks: 'rgba(6, 182, 212, 0.6)',
+    walkthrough: 'rgba(16, 185, 129, 0.6)'
+  };
+
+  const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+  path.setAttribute('d', d);
+  path.setAttribute('stroke', strokeColors[type] || 'rgba(99, 102, 241, 0.6)');
+  path.setAttribute('stroke-width', '2');
+  path.setAttribute('fill', 'none');
+  path.setAttribute('marker-end', `url(#arrow-${type})`);
+  path.setAttribute('stroke-dasharray', '6 3');
+  path.style.opacity = '0.8';
+
+  svg.appendChild(path);
+}
+
+// ---- Render Pipeline ----
+
+function renderChangeNodes() {
+  // Remove old artifact cards and change nodes
+  document.querySelectorAll('.window-container.change-card').forEach(el => el.remove());
+  document.querySelectorAll('.window-container.change-node').forEach(el => el.remove());
+
+  const deletedIds = state.deletedChangeIds || [];
+
+  // Remove old Feature Nodes that no longer exist in state or are deleted
+  document.querySelectorAll('.feature-node').forEach(el => {
+    const changeId = el.id.replace('feature_', '');
+    const isDeleted = deletedIds.includes(changeId);
+    if (!state.changes.find(c => c.id === changeId) || isDeleted) {
+      el.remove();
+    }
+  });
+
+  const visibleChanges = state.changes.filter(c => !deletedIds.includes(c.id));
+
+  // Create/update Feature Nodes for each visible change
+  visibleChanges.forEach(change => {
+    const changeArtifacts = state.artifacts.filter(art => art.change_id === change.id);
+    createFeatureNodeDOM(change, changeArtifacts);
+  });
+
+  // If a Feature was expanded, re-expand it
+  if (expandedChangeId) {
+    const stillExists = visibleChanges.find(c => c.id === expandedChangeId);
+    if (stillExists) {
+      // Re-create artifact cards if they're not in the DOM
+      const artifacts = state.artifacts.filter(a => a.change_id === expandedChangeId);
+      const anyChildInDOM = artifacts.some(a => document.getElementById(a.id));
+      if (!anyChildInDOM && artifacts.length > 0) {
+        const change = stillExists;
+        artifacts.forEach(art => {
+          const defaults = ARTIFACT_DEFAULTS[art.type] || { width: 650, height: 450 };
+          createArtifactCardDOM(art, change, defaults);
+        });
       }
-    });
+    } else {
+      expandedChangeId = null;
+    }
+  }
+
+  drawConnections();
 }
 
 function syncWithServer() {
@@ -446,45 +1344,62 @@ function syncWithServer() {
   }
 }
 
-function renderChangeNodes() {
-  document.querySelectorAll('.window-container.change-node').forEach(el => el.remove());
 
-  state.changes.forEach(change => {
-    const changeArtifacts = state.artifacts.filter(art => art.change_id === change.id);
-    createChangeNodeDOM(change, changeArtifacts);
+let selectedProjectFilter = 'all';
+
+function updateProjectFilterDropdown(projects) {
+  const select = document.getElementById('inbox-project-filter');
+  if (!select) return;
+
+  const currentValue = select.value;
+  select.innerHTML = '<option value="all">All Projects</option>';
+
+  projects.forEach(p => {
+    const opt = document.createElement('option');
+    opt.value = p;
+    opt.textContent = p;
+    select.appendChild(opt);
   });
-}
 
-function formatRelativeTime(timestamp) {
-  if (!timestamp) return 'unknown';
-  const diff = Date.now() - timestamp;
-  const secs = Math.floor(diff / 1000);
-  const mins = Math.floor(secs / 60);
-  const hours = Math.floor(mins / 60);
-  const days = Math.floor(hours / 24);
-
-  if (secs < 60) return 'Just now';
-  if (mins < 60) return `${mins}m ago`;
-  if (hours < 24) return `${hours}h ago`;
-  return `${days}d ago`;
+  const exists = Array.from(select.options).some(opt => opt.value === currentValue);
+  if (exists) {
+    select.value = currentValue;
+  } else {
+    selectedProjectFilter = 'all';
+    select.value = 'all';
+  }
 }
 
 function renderInboxList(inboxItems) {
+  state.inboxItems = inboxItems;
+  
+  const projects = [];
+  inboxItems.forEach(item => {
+    if (item.projectName && !projects.includes(item.projectName)) {
+      projects.push(item.projectName);
+    }
+  });
+  updateProjectFilterDropdown(projects);
+
   const inboxListEl = document.getElementById('inbox-list');
   const badgeEl = document.getElementById('inbox-badge');
   
   inboxListEl.innerHTML = '';
   
-  if (inboxItems.length === 0) {
-    inboxListEl.innerHTML = '<div style="color:var(--text-muted); font-size:13px; text-align:center; padding:20px;">No pending changes detected</div>';
-    badgeEl.style.display = 'none';
+  const filteredItems = inboxItems.filter(item => {
+    if (selectedProjectFilter === 'all') return true;
+    return item.projectName === selectedProjectFilter;
+  });
+
+  badgeEl.textContent = inboxItems.length;
+  badgeEl.style.display = inboxItems.length > 0 ? 'inline-block' : 'none';
+
+  if (filteredItems.length === 0) {
+    inboxListEl.innerHTML = '<div style="color:var(--text-muted); font-size:13px; text-align:center; padding:20px;">No pending changes for this project</div>';
     return;
   }
 
-  badgeEl.textContent = inboxItems.length;
-  badgeEl.style.display = 'inline-block';
-
-  inboxItems.forEach(item => {
+  filteredItems.forEach(item => {
     const li = document.createElement('li');
     li.className = 'inbox-item';
     
@@ -541,6 +1456,20 @@ function renderInboxList(inboxItems) {
   });
 }
 
+function formatRelativeTime(timestamp) {
+  if (!timestamp) return 'unknown';
+  const diff = Date.now() - timestamp;
+  const secs = Math.floor(diff / 1000);
+  const mins = Math.floor(secs / 60);
+  const hours = Math.floor(mins / 60);
+  const days = Math.floor(hours / 24);
+
+  if (secs < 60) return 'Just now';
+  if (mins < 60) return `${mins}m ago`;
+  if (hours < 24) return `${hours}h ago`;
+  return `${days}d ago`;
+}
+
 function escapeHtml(text) {
   return text
     .replace(/&/g, "&amp;")
@@ -585,6 +1514,27 @@ function renderMarkdown(winId) {
   });
 
   // Code Highlighting with Prism
+  if (window.mermaid) {
+    const mermaidCodes = previewEl.querySelectorAll('pre code.language-mermaid');
+    mermaidCodes.forEach((codeEl, idx) => {
+      const preEl = codeEl.parentElement;
+      const rawCode = codeEl.textContent;
+      
+      const mermaidDiv = document.createElement('div');
+      mermaidDiv.className = 'mermaid';
+      mermaidDiv.id = `mermaid-${winId}-${idx}`;
+      mermaidDiv.textContent = rawCode;
+      
+      preEl.replaceWith(mermaidDiv);
+    });
+    
+    try {
+      window.mermaid.init(undefined, previewEl.querySelectorAll('.mermaid'));
+    } catch (e) {
+      console.error("Mermaid rendering failed:", e);
+    }
+  }
+
   if (window.Prism) {
     window.Prism.highlightAllUnder(previewEl);
   }
@@ -932,6 +1882,34 @@ function createNewNote(x = null, y = null) {
   saveState();
 }
 
+function createNoteWithContent(title, content) {
+  const viewWidth = canvasContainer.clientWidth;
+  const viewHeight = canvasContainer.clientHeight;
+  const x = (viewWidth / 2 - state.pan.x) / state.zoom - 200;
+  const y = (viewHeight / 2 - state.pan.y) / state.zoom - 150;
+
+  const newWin = {
+    id: generateId(),
+    name: title,
+    content: content,
+    x: Math.round(x),
+    y: Math.round(y),
+    width: 450,
+    height: 350,
+    zIndex: ++maxZIndex,
+    isCollapsed: false,
+    editMode: false,
+    openComplete: true
+  };
+
+  state.windows.push(newWin);
+  createWindowDOM(newWin);
+  updateSidebar();
+  toggleOnboarding();
+  focusWindow(newWin.id);
+  saveState();
+}
+
 function panOffsetCorrection() {
   return { x: state.pan.x, y: state.pan.y };
 }
@@ -1139,7 +2117,7 @@ function setActiveTool(tool) {
     canvasContainer.classList.add('pan-mode');
     
     // Deselect all selected windows when entering pan mode
-    document.querySelectorAll('.window-container.selected').forEach(el => el.classList.remove('selected'));
+    document.querySelectorAll('.window-container.selected, .feature-node.selected').forEach(el => el.removeProperty ? el.removeProperty('selected') : el.classList.remove('selected'));
   }
   saveState();
 }
@@ -1150,6 +2128,14 @@ function setActiveTool(tool) {
 function init() {
   loadState();
   applyTheme();
+  
+  if (window.mermaid) {
+    window.mermaid.initialize({
+      startOnLoad: false,
+      theme: state.theme === 'dark' ? 'dark' : 'default',
+      securityLevel: 'loose'
+    });
+  }
   
   // Recreate windows from saved state
   state.windows.forEach(w => createWindowDOM(w));
@@ -1179,7 +2165,39 @@ function init() {
       }
     }
     if (e.key === 'Escape') {
-      document.querySelectorAll('.window-container.selected').forEach(el => el.classList.remove('selected'));
+      document.querySelectorAll('.window-container.selected, .feature-node.selected').forEach(el => el.classList.remove('selected'));
+    }
+    if (e.key === 'Delete' || e.key === 'Backspace') {
+      const selected = document.querySelectorAll('.window-container.selected, .feature-node.selected');
+      if (selected.length > 0) {
+        e.preventDefault();
+        if (confirm(`Remove the ${selected.length} selected item(s) from the canvas?`)) {
+          selected.forEach(el => {
+            const id = el.id;
+            if (el.classList.contains('feature-node')) {
+              const changeId = id.replace('feature_', '');
+              if (expandedChangeId === changeId) {
+                collapseFeature(changeId);
+              }
+              if (!state.deletedChangeIds) {
+                state.deletedChangeIds = [];
+              }
+              if (!state.deletedChangeIds.includes(changeId)) {
+                state.deletedChangeIds.push(changeId);
+              }
+              el.remove();
+            } else {
+              // Standard note
+              state.windows = state.windows.filter(w => w.id !== id);
+              el.remove();
+            }
+          });
+          saveState();
+          updateSidebar();
+          toggleOnboarding();
+          drawConnections();
+        }
+      }
     }
     if (e.key === 'v' || e.key === 'V') {
       setActiveTool('select');
@@ -1220,7 +2238,7 @@ function init() {
         selectionStart.y = e.clientY;
         
         // Deselect all windows/elements
-        document.querySelectorAll('.window-container.selected').forEach(el => el.classList.remove('selected'));
+        document.querySelectorAll('.window-container.selected, .feature-node.selected').forEach(el => el.classList.remove('selected'));
         
         // Create selection box element
         selectionBoxEl = document.createElement('div');
@@ -1278,7 +2296,7 @@ function init() {
 
       // Check intersections with all cards
       const boxRect = { left: x1, top: y1, right: x2, bottom: y2 };
-      document.querySelectorAll('.window-container').forEach(winEl => {
+      document.querySelectorAll('.window-container, .feature-node').forEach(winEl => {
         const winRect = winEl.getBoundingClientRect();
         const intersects = !(boxRect.right < winRect.left || 
                              boxRect.left > winRect.right || 
@@ -1302,14 +2320,21 @@ function init() {
         win.x = Math.round(item.startWinX + dx);
         win.y = Math.round(item.startWinY + dy);
 
-        const winEl = document.getElementById(win.id);
+        const elementId = item.elementId || win.id;
+        const winEl = document.getElementById(elementId);
         if (winEl) {
           winEl.style.left = `${win.x}px`;
           winEl.style.top = `${win.y}px`;
         }
-      });
-    }
 
+        // Real-time collision avoidance for sibling artifact windows
+        if (item.isArtifact && win.change_id === expandedChangeId) {
+          resolveChildCollisions(win.id);
+        }
+      });
+      drawConnections();
+    }
+ 
     // 4. Resize Action (Edge / Corner Resize)
     else if (activeResize) {
       const dx = (e.clientX - activeResize.startX) / state.zoom;
@@ -1319,47 +2344,84 @@ function init() {
       const winEl = document.getElementById(win.id);
       
       if (!winEl) return;
+ 
+      if (activeResize.isArtifact) {
+        const uiState = state.artifactUIState[win.id];
+        if (!uiState.baseWidth || !uiState.baseHeight) {
+          uiState.baseWidth = uiState.width || 420;
+          uiState.baseHeight = (uiState.height || 320) - 42;
+        }
 
-      // Ensure base dimensions are cached
-      if (!win.baseWidth || !win.baseHeight) {
-        win.baseWidth = win.width || 450;
-        win.baseHeight = (win.height || 400) - 42;
+        let scale = 1.0;
+        if (activeResize.handleType === 'r') {
+          const targetWidth = Math.max(200, activeResize.startW + dx);
+          scale = targetWidth / uiState.baseWidth;
+        } else if (activeResize.handleType === 'b') {
+          const targetHeight = Math.max(120, activeResize.startH + dy);
+          scale = (targetHeight - 42) / uiState.baseHeight;
+        } else if (activeResize.handleType === 'se') {
+          const targetWidth = Math.max(200, activeResize.startW + dx);
+          const targetHeight = Math.max(120, activeResize.startH + dy);
+          const scaleX = targetWidth / uiState.baseWidth;
+          const scaleY = (targetHeight - 42) / uiState.baseHeight;
+          scale = Math.max(scaleX, scaleY);
+        }
+
+        const minScaleW = 200 / uiState.baseWidth;
+        const minScaleH = (120 - 42) / uiState.baseHeight;
+        const minScale = Math.max(minScaleW, minScaleH);
+        scale = Math.max(minScale, scale);
+
+        uiState.width = Math.round(uiState.baseWidth * scale);
+        uiState.height = Math.round(uiState.baseHeight * scale + 42);
+
+        winEl.style.width = `${uiState.width}px`;
+        winEl.style.height = `${uiState.height}px`;
+
+        updateArtifactWindowScale(win, winEl);
+        drawConnections();
+      } else {
+        // Ensure base dimensions are cached
+        if (!win.baseWidth || !win.baseHeight) {
+          win.baseWidth = win.width || 450;
+          win.baseHeight = (win.height || 400) - 42;
+        }
+
+        // Calculate scale based on the handle type
+        let scale = 1.0;
+        if (activeResize.handleType === 'r') {
+          const targetWidth = Math.max(200, activeResize.startW + dx);
+          scale = targetWidth / win.baseWidth;
+        } else if (activeResize.handleType === 'b') {
+          const targetHeight = Math.max(120, activeResize.startH + dy);
+          scale = (targetHeight - 42) / win.baseHeight;
+        } else if (activeResize.handleType === 'se') {
+          const targetWidth = Math.max(200, activeResize.startW + dx);
+          const targetHeight = Math.max(120, activeResize.startH + dy);
+          const scaleX = targetWidth / win.baseWidth;
+          const scaleY = (targetHeight - 42) / win.baseHeight;
+          scale = Math.max(scaleX, scaleY);
+        }
+
+        // Constrain scale so it doesn't violate min width (200px) or min height (120px)
+        const minScaleW = 200 / win.baseWidth;
+        const minScaleH = (120 - 42) / win.baseHeight;
+        const minScale = Math.max(minScaleW, minScaleH);
+        scale = Math.max(minScale, scale);
+
+        // Rescale dimensions proportionally
+        win.width = Math.round(win.baseWidth * scale);
+        win.height = Math.round(win.baseHeight * scale + 42);
+
+        winEl.style.width = `${win.width}px`;
+        winEl.style.height = `${win.height}px`;
+
+        // Update scale on preview panel dynamically during resize
+        updateWindowScale(win, winEl);
       }
-
-      // Calculate scale based on the handle type
-      let scale = 1.0;
-      if (activeResize.handleType === 'r') {
-        const targetWidth = Math.max(200, activeResize.startW + dx);
-        scale = targetWidth / win.baseWidth;
-      } else if (activeResize.handleType === 'b') {
-        const targetHeight = Math.max(120, activeResize.startH + dy);
-        scale = (targetHeight - 42) / win.baseHeight;
-      } else if (activeResize.handleType === 'se') {
-        const targetWidth = Math.max(200, activeResize.startW + dx);
-        const targetHeight = Math.max(120, activeResize.startH + dy);
-        const scaleX = targetWidth / win.baseWidth;
-        const scaleY = (targetHeight - 42) / win.baseHeight;
-        scale = Math.max(scaleX, scaleY);
-      }
-
-      // Constrain scale so it doesn't violate min width (200px) or min height (120px)
-      const minScaleW = 200 / win.baseWidth;
-      const minScaleH = (120 - 42) / win.baseHeight;
-      const minScale = Math.max(minScaleW, minScaleH);
-      scale = Math.max(minScale, scale);
-
-      // Rescale dimensions proportionally
-      win.width = Math.round(win.baseWidth * scale);
-      win.height = Math.round(win.baseHeight * scale + 42);
-
-      winEl.style.width = `${win.width}px`;
-      winEl.style.height = `${win.height}px`;
-
-      // Update scale on preview panel dynamically during resize
-      updateWindowScale(win, winEl);
     }
   });
-
+ 
   // Mouse Up reset actions
   window.addEventListener('mouseup', () => {
     if (isPanning) {
@@ -1376,7 +2438,7 @@ function init() {
     if (activeDrag) {
       if (isServerConnected) {
         activeDrag.selectedWins.forEach(item => {
-          if (item.isChangeNode) {
+          if (item.isFeatureNode || item.isChangeNode) {
             fetch('http://localhost:3000/api/changes/layout', {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
@@ -1386,6 +2448,41 @@ function init() {
                 y: item.window.y
               })
             }).catch(err => console.error("Failed to save coordinates:", err));
+          } else if (item.isArtifact) {
+            fetch('http://localhost:3000/api/artifacts/layout', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                id: item.window.id,
+                changeId: item.window.change_id,
+                type: item.window.type,
+                x: item.window.x,
+                y: item.window.y
+              })
+            }).catch(err => console.error("Failed to save artifact coordinates:", err));
+
+            // Also persist sibling artifact positions that were pushed due to collision
+            const siblings = state.artifacts.filter(a => a.change_id === item.window.change_id && a.id !== item.window.id);
+            siblings.forEach(sib => {
+              const sibEl = document.getElementById(sib.id);
+              if (sibEl) {
+                const currentX = parseFloat(sibEl.style.left) || sib.x;
+                const currentY = parseFloat(sibEl.style.top) || sib.y;
+                sib.x = currentX;
+                sib.y = currentY;
+                fetch('http://localhost:3000/api/artifacts/layout', {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({
+                    id: sib.id,
+                    changeId: sib.change_id,
+                    type: sib.type,
+                    x: currentX,
+                    y: currentY
+                  })
+                }).catch(err => console.error("Failed to save sibling coordinates:", err));
+              }
+            });
           }
         });
       }
@@ -1508,13 +2605,29 @@ function init() {
 
   // Clear workspace action
   document.getElementById('clear-all-btn').addEventListener('click', () => {
-    if (state.windows.length === 0) return;
-    if (confirm("Are you sure you want to clear all documents?")) {
-      document.querySelectorAll('.window-container').forEach(el => el.remove());
+    const hasNotes = state.windows.length > 0;
+    const hasChanges = state.changes.length > 0;
+    if (!hasNotes && !hasChanges) return;
+
+    if (confirm("Are you sure you want to clear all documents from the canvas?")) {
       state.windows = [];
+      document.querySelectorAll('.window-container').forEach(el => el.remove());
+      document.querySelectorAll('.feature-node').forEach(el => el.remove());
+      
+      if (!state.deletedChangeIds) {
+        state.deletedChangeIds = [];
+      }
+      state.changes.forEach(c => {
+        if (!state.deletedChangeIds.includes(c.id)) {
+          state.deletedChangeIds.push(c.id);
+        }
+      });
+
+      expandedChangeId = null;
       updateSidebar();
       toggleOnboarding();
       saveState();
+      drawConnections();
     }
   });
 
@@ -1522,6 +2635,20 @@ function init() {
   document.getElementById('theme-toggle').addEventListener('click', () => {
     state.theme = state.theme === 'dark' ? 'light' : 'dark';
     applyTheme();
+    
+    if (window.mermaid) {
+      window.mermaid.initialize({
+        theme: state.theme === 'dark' ? 'dark' : 'default'
+      });
+      state.windows.forEach(w => renderMarkdown(w.id));
+      if (expandedChangeId) {
+        state.artifacts.filter(a => a.change_id === expandedChangeId).forEach(art => {
+          const winEl = document.getElementById(art.id);
+          if (winEl) renderArtifactMarkdown(art, winEl);
+        });
+      }
+    }
+    
     saveState();
   });
 
@@ -1577,13 +2704,32 @@ function init() {
     const title = document.getElementById('change-title-input').value.trim();
     const featureName = document.getElementById('change-feature-input').value.trim();
 
+    let maxX = 0;
+    let targetY = 100;
+    document.querySelectorAll('.feature-node').forEach(el => {
+      const left = parseFloat(el.style.left) || 0;
+      const width = el.offsetWidth || 280;
+      if (left + width > maxX) {
+        maxX = left + width;
+      }
+      const top = parseFloat(el.style.top) || 100;
+      if (top > targetY) {
+        targetY = top;
+      }
+    });
+
+    const newX = maxX > 0 ? maxX + 70 : 100;
+    const newY = targetY;
+
     fetch('http://localhost:3000/api/inbox/accept', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         id: currentInboxItemToAccept.id,
         title: title,
-        featureName: featureName
+        featureName: featureName,
+        x: newX,
+        y: newY
       })
     })
     .then(res => res.json())
@@ -1601,6 +2747,76 @@ function init() {
       closeAcceptModal();
     }
   });
+
+  // Project Filtering Select Listener
+  const projectFilter = document.getElementById('inbox-project-filter');
+  if (projectFilter) {
+    projectFilter.addEventListener('change', (e) => {
+      selectedProjectFilter = e.target.value;
+      if (state.inboxItems) {
+        renderInboxList(state.inboxItems);
+      }
+    });
+  }
+
+  // Import All Filtered Button Listener
+  const importAllBtn = document.getElementById('inbox-import-all-btn');
+  if (importAllBtn) {
+    importAllBtn.addEventListener('click', () => {
+      if (!state.inboxItems || state.inboxItems.length === 0) return;
+
+      const filteredItems = state.inboxItems.filter(item => {
+        if (selectedProjectFilter === 'all') return true;
+        return item.projectName === selectedProjectFilter;
+      });
+
+      if (filteredItems.length === 0) {
+        alert("No change candidates match the selected project filter.");
+        return;
+      }
+
+      if (confirm(`Import all ${filteredItems.length} filtered change candidates?`)) {
+        let currentMaxX = 0;
+        let targetY = 100;
+        document.querySelectorAll('.feature-node').forEach(el => {
+          const left = parseFloat(el.style.left) || 0;
+          const width = el.offsetWidth || 280;
+          if (left + width > currentMaxX) {
+            currentMaxX = left + width;
+          }
+          const top = parseFloat(el.style.top) || 100;
+          if (top > targetY) {
+            targetY = top;
+          }
+        });
+
+        let startX = currentMaxX > 0 ? currentMaxX + 70 : 100;
+
+        let chain = Promise.resolve();
+        filteredItems.forEach((item, index) => {
+          const nextX = startX + index * 350; // 280px width + 70px spacing
+          chain = chain.then(() => {
+            return fetch('http://localhost:3000/api/inbox/accept', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                id: item.id,
+                title: item.title,
+                featureName: '',
+                x: nextX,
+                y: targetY
+              })
+            })
+            .then(res => res.json());
+          });
+        });
+
+        chain.then(() => {
+          syncWithServer();
+        });
+      }
+    });
+  }
 
   // Window Focus event auto-refresh
   window.addEventListener('focus', () => {
@@ -1653,9 +2869,108 @@ function init() {
     });
   }
 
+  // Share Workspace Actions
+  const shareBtn = document.getElementById('share-btn');
+  const shareModal = document.getElementById('share-modal');
+  const closeShareModalBtn = document.getElementById('close-share-modal-btn');
+  const closeShareModalOkBtn = document.getElementById('close-share-modal-ok-btn');
+  const copyShareLinkBtn = document.getElementById('copy-share-link-btn');
+  const shareLinkInput = document.getElementById('share-link-input');
+
+  if (shareBtn) {
+    shareBtn.addEventListener('click', () => {
+      shareWorkspace();
+    });
+  }
+
+  if (closeShareModalBtn) {
+    closeShareModalBtn.addEventListener('click', () => {
+      if (shareModal) shareModal.style.display = 'none';
+    });
+  }
+
+  if (closeShareModalOkBtn) {
+    closeShareModalOkBtn.addEventListener('click', () => {
+      if (shareModal) shareModal.style.display = 'none';
+    });
+  }
+
+  if (copyShareLinkBtn && shareLinkInput) {
+    copyShareLinkBtn.addEventListener('click', () => {
+      shareLinkInput.select();
+      shareLinkInput.setSelectionRange(0, 99999);
+      navigator.clipboard.writeText(shareLinkInput.value)
+        .then(() => {
+          showToast("Share link copied to clipboard!");
+        })
+        .catch(err => {
+          console.error("Failed to copy:", err);
+          showToast("Failed to copy link.", "error");
+        });
+    });
+  }
+
+  // Onboarding Paste Action
+  const onboardingPasteBtn = document.getElementById('onboarding-paste-btn');
+  const pasteModal = document.getElementById('paste-modal');
+  const closePasteModalBtn = document.getElementById('close-paste-modal-btn');
+  const closePasteModalCancelBtn = document.getElementById('close-paste-modal-cancel-btn');
+  const submitPasteBtn = document.getElementById('submit-paste-btn');
+  const pasteTitleInput = document.getElementById('paste-title-input');
+  const pasteTextInput = document.getElementById('paste-text-input');
+
+  if (onboardingPasteBtn && pasteModal) {
+    onboardingPasteBtn.addEventListener('click', () => {
+      if (pasteTitleInput) pasteTitleInput.value = '';
+      if (pasteTextInput) pasteTextInput.value = '';
+      pasteModal.style.display = 'flex';
+    });
+  }
+
+  if (closePasteModalBtn) {
+    closePasteModalBtn.addEventListener('click', () => {
+      if (pasteModal) pasteModal.style.display = 'none';
+    });
+  }
+
+  if (closePasteModalCancelBtn) {
+    closePasteModalCancelBtn.addEventListener('click', () => {
+      if (pasteModal) pasteModal.style.display = 'none';
+    });
+  }
+
+  if (submitPasteBtn && pasteTextInput) {
+    submitPasteBtn.addEventListener('click', () => {
+      const content = pasteTextInput.value;
+      let title = (pasteTitleInput && pasteTitleInput.value.trim()) || `Note_${state.windows.length + 1}.md`;
+      if (!title.endsWith('.md')) {
+        title = `${title}.md`;
+      }
+      
+      if (!content.trim()) {
+        showToast("Please paste some markdown text first.", "error");
+        return;
+      }
+
+      createNoteWithContent(title, content);
+      
+      if (pasteModal) pasteModal.style.display = 'none';
+      showToast("Note created from pasted text!");
+    });
+  }
+
   // Start periodic sync polling
   syncWithServer();
   setInterval(syncWithServer, 4000);
+
+  // Check for shared canvas link in URL
+  const urlParams = new URLSearchParams(window.location.search);
+  const shareId = urlParams.get('share');
+  if (shareId) {
+    setTimeout(() => {
+      loadSharedCanvas(shareId);
+    }, 400);
+  }
 }
 
 function exportWorkspace() {
@@ -1697,7 +3012,7 @@ function importWorkspace(file) {
       if (confirm(`Load workspace "${data.workspaceName || 'Untitled'}"? This will replace your current notes layout.`)) {
         // Remove standard card DOM containers
         document.querySelectorAll('.window-container').forEach(el => {
-          if (!el.classList.contains('change-node')) {
+          if (!el.classList.contains('change-card')) {
             el.remove();
           }
         });
@@ -1717,6 +3032,7 @@ function importWorkspace(file) {
         updateTransform();
 
         state.windows.forEach(w => createWindowDOM(w));
+        drawConnections();
 
         updateSidebar();
         toggleOnboarding();
@@ -1727,6 +3043,147 @@ function importWorkspace(file) {
     }
   };
   reader.readAsText(file);
+}
+
+function showToast(message, type = 'success') {
+  let container = document.querySelector('.toast-container');
+  if (!container) {
+    container = document.createElement('div');
+    container.className = 'toast-container';
+    document.body.appendChild(container);
+  }
+
+  const toast = document.createElement('div');
+  toast.className = `toast ${type}`;
+  
+  let iconHtml = '';
+  if (type === 'success') {
+    iconHtml = `<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="color:var(--accent-cyan);"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>`;
+  } else {
+    iconHtml = `<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="color:var(--danger-color);"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>`;
+  }
+
+  toast.innerHTML = `
+    <span class="toast-icon">${iconHtml}</span>
+    <span class="toast-message">${message}</span>
+    <button class="toast-close">✕</button>
+  `;
+
+  container.appendChild(toast);
+
+  const closeBtn = toast.querySelector('.toast-close');
+  const dismiss = () => {
+    toast.style.animation = 'toast-out 0.2s cubic-bezier(0.16, 1, 0.3, 1) forwards';
+    setTimeout(() => {
+      toast.remove();
+      if (container.children.length === 0) {
+        container.remove();
+      }
+    }, 200);
+  };
+
+  closeBtn.addEventListener('click', dismiss);
+  setTimeout(dismiss, 4000);
+}
+
+function shareWorkspace() {
+  const workspaceName = state.workspaceName || 'canvas';
+  const exportData = {
+    workspaceId: state.workspaceId || 'uuid-placeholder',
+    workspaceName: workspaceName,
+    createdAt: state.createdAt || new Date().toISOString(),
+    version: 1,
+    pan: state.pan,
+    zoom: state.zoom,
+    theme: state.theme,
+    windows: state.windows,
+    deletedChangeIds: state.deletedChangeIds || [],
+    expandedChangeId: expandedChangeId || null
+  };
+
+  fetch('http://localhost:3000/api/share', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({ state: exportData })
+  })
+  .then(res => res.json())
+  .then(data => {
+    if (data.success && data.shareId) {
+      const shareUrl = `${window.location.origin}${window.location.pathname}?share=${data.shareId}`;
+      const shareLinkInput = document.getElementById('share-link-input');
+      const shareModal = document.getElementById('share-modal');
+      if (shareLinkInput && shareModal) {
+        shareLinkInput.value = shareUrl;
+        shareModal.style.display = 'flex';
+        showToast("Canvas shared successfully!");
+      }
+    } else {
+      showToast("Failed to share canvas: " + (data.error || "Unknown error"), "error");
+    }
+  })
+  .catch(err => {
+    console.error("Error sharing canvas:", err);
+    showToast("Error sharing canvas. Is the server running?", "error");
+  });
+}
+
+function loadSharedCanvas(shareId) {
+  fetch(`http://localhost:3000/api/share/${shareId}`)
+    .then(res => res.json())
+    .then(data => {
+      if (data.success && data.state) {
+        const sharedState = data.state;
+        if (confirm(`Load shared workspace "${sharedState.workspaceName || 'Untitled'}"? This will replace your current notes layout.`)) {
+          // Remove standard card DOM containers
+          document.querySelectorAll('.window-container').forEach(el => {
+            if (!el.classList.contains('change-card')) {
+              el.remove();
+            }
+          });
+
+          // Apply state
+          state.workspaceId = sharedState.workspaceId;
+          state.workspaceName = sharedState.workspaceName;
+          state.pan = sharedState.pan || { x: 100, y: 100 };
+          state.zoom = sharedState.zoom || 1.0;
+          state.theme = sharedState.theme || 'dark';
+          
+          state.windows = (sharedState.windows || []).map(w => {
+            w.id = String(w.id);
+            return w;
+          });
+          state.deletedChangeIds = sharedState.deletedChangeIds || [];
+          expandedChangeId = sharedState.expandedChangeId || null;
+
+          applyTheme();
+          updateTransform();
+
+          state.windows.forEach(w => createWindowDOM(w));
+          drawConnections();
+
+          updateSidebar();
+          toggleOnboarding();
+          saveState();
+
+          showToast(`Loaded shared workspace: ${state.workspaceName}`);
+          
+          // Clear URL query parameters from address bar
+          window.history.replaceState({}, document.title, window.location.pathname);
+        } else {
+          window.history.replaceState({}, document.title, window.location.pathname);
+        }
+      } else {
+        showToast("Failed to load shared workspace: " + (data.error || "Unknown error"), "error");
+        window.history.replaceState({}, document.title, window.location.pathname);
+      }
+    })
+    .catch(err => {
+      console.error("Error loading shared workspace:", err);
+      showToast("Error loading shared workspace. Is the server running?", "error");
+      window.history.replaceState({}, document.title, window.location.pathname);
+    });
 }
 
 function adjustZoomCenter(ratio) {
