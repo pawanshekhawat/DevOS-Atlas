@@ -2992,7 +2992,8 @@ function exportWorkspace() {
     pan: state.pan,
     zoom: state.zoom,
     theme: state.theme,
-    windows: state.windows
+    windows: state.windows,
+    artifactUIState: state.artifactUIState || {}
   };
 
   const dataStr = JSON.stringify(exportData, null, 2);
@@ -3031,6 +3032,7 @@ function importWorkspace(file) {
         state.pan = data.pan || { x: 100, y: 100 };
         state.zoom = data.zoom || 1.0;
         state.theme = data.theme || 'dark';
+        state.artifactUIState = data.artifactUIState || {};
         
         state.windows = (data.windows || []).map(w => {
           w.id = String(w.id);
@@ -3106,6 +3108,7 @@ function shareWorkspace() {
     zoom: state.zoom,
     theme: state.theme,
     windows: state.windows,
+    artifactUIState: state.artifactUIState || {},
     deletedChangeIds: state.deletedChangeIds || [],
     expandedChangeId: expandedChangeId || null
   };
@@ -3158,6 +3161,7 @@ function loadSharedCanvas(shareId) {
           state.pan = sharedState.pan || { x: 100, y: 100 };
           state.zoom = sharedState.zoom || 1.0;
           state.theme = sharedState.theme || 'dark';
+          state.artifactUIState = sharedState.artifactUIState || {};
           
           state.windows = (sharedState.windows || []).map(w => {
             w.id = String(w.id);
@@ -3174,6 +3178,12 @@ function loadSharedCanvas(shareId) {
 
           updateSidebar();
           toggleOnboarding();
+          
+          // Fit screen to content by default
+          setTimeout(() => {
+            fitAllWindows();
+          }, 50);
+
           saveState();
 
           showToast(`Loaded shared workspace: ${state.workspaceName}`);
@@ -3222,8 +3232,24 @@ function initTouchToMouseMapping() {
     const touches = event.changedTouches;
     if (!touches || touches.length === 0) return;
     const first = touches[0];
-    let type = "";
 
+    // Skip touch-to-mouse mapping for interactive elements
+    const isInteractive = 
+      event.target.tagName === 'TEXTAREA' || 
+      event.target.tagName === 'INPUT' || 
+      event.target.tagName === 'BUTTON' || 
+      event.target.tagName === 'SELECT' || 
+      event.target.closest('button') ||
+      event.target.closest('.window-body') ||
+      event.target.closest('.sidebar') ||
+      event.target.closest('.modal-content') ||
+      event.target.isContentEditable;
+
+    if (isInteractive) {
+      return; // Let browser trigger standard touch clicks, focusing, typing, and scrolling
+    }
+
+    let type = "";
     switch (event.type) {
       case "touchstart": 
         type = "mousedown"; 
@@ -3264,10 +3290,7 @@ function initTouchToMouseMapping() {
     first.target.dispatchEvent(simulatedEvent);
     
     // Prevent default scrolling on canvas (allow inside notes)
-    const isInteractive = event.target.tagName === 'TEXTAREA' || event.target.tagName === 'INPUT' || event.target.closest('.window-body');
-    if (!isInteractive) {
-      event.preventDefault();
-    }
+    event.preventDefault();
   }
 
   document.addEventListener("touchstart", touchHandler, { passive: false });
